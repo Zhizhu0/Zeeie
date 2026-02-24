@@ -2,12 +2,30 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'dart:io';
+import 'dart:collection';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:flutter/services.dart';
+import 'user_script_manager.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:screen_retriever/screen_retriever.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await windowManager.ensureInitialized();
+
+  WindowOptions windowOptions = const WindowOptions(
+    size: Size(800, 600),
+    center: true,
+  );
+  
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.show();
+    await windowManager.focus();
+  });
+
   runApp(const MyApp());
 }
 
@@ -56,13 +74,23 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
 
   late List<AppItem> myApps;
 
+  UserScript? _biliUserScript;
+  List<UserScriptConfig> ScriptsList = [];
+
+  final GlobalKey webViewKey = GlobalKey();
+  InAppWebViewController? webViewController;
+  bool _isFullscreen = false;
+
+  Rect? _previousBounds;
+  bool _wasMaximizedBeforeFullscreen = false; 
+
   @override
   void initState() {
     super.initState();
 
     _startServer();
     
-    // 初始化动画 (保持原样)
+    // 初始化动画
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 15),
@@ -99,6 +127,8 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
       _buildAppItem("Pixiv", "assets/icons/pixiv.svg", "https://www.pixiv.net/"),
       _buildAppItem("设置", Icons.settings, "assets/web/settings.html"),
     ];
+
+    _loadUserScripts();
   }
 
   Future<void> _startServer() async {
@@ -106,10 +136,51 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
     _actualPort = socket.port;
     await socket.close();
 
-    // 2. 使用这个确定的可用端口启动服务器
     localhostServer = InAppLocalhostServer(port: _actualPort);
     await localhostServer.start();
-    setState(() {}); // 服务器启动后刷新一下
+    setState(() {});
+  }
+
+  Future<void> _loadUserScripts() async {
+    try {
+      // 假设你的脚本放在 assets/scripts/bilibili_ad_hidden.js
+      // 记得在 pubspec.yaml 注册 assets
+
+      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+  
+      final List<String> scripts = manifest.listAssets()
+        .where((String key) => key.startsWith('assets/scripts/'))
+        .toList();
+      
+      for (var scriptPath in scripts) {
+        String jsContent = await rootBundle.loadString(scriptPath);
+        
+        var config = UserScriptManager.parse(jsContent);
+        ScriptsList.add(config);
+      }
+      // String jsContent = await rootBundle.loadString('assets/scripts/bilibili_ad_hidden.js');
+      
+      // var config = UserScriptManager.parse(jsContent);
+      // print(config);
+      // var finalJs = UserScriptManager.generateInjectionCode(config);
+
+      // // 映射 RunAt 字符串到枚举
+      // UserScriptInjectionTime injectionTime = UserScriptInjectionTime.AT_DOCUMENT_END;
+      // if (config.runAt.contains('start')) {
+      //   injectionTime = UserScriptInjectionTime.AT_DOCUMENT_START;
+      // }
+
+      // setState(() {
+      //   _biliUserScript = UserScript(
+      //     source: finalJs,
+      //     injectionTime: injectionTime,
+      //     // 这里如果不设置 forMainFrameOnly: true，可能会注入到 iframe 里的广告导致报错或重复执行
+      //     forMainFrameOnly: true, 
+      //   );
+      // });
+    } catch (e) {
+      debugPrint("Failed to load user script: $e");
+    }
   }
 
   @override
@@ -180,10 +251,11 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
           Row(
             children: [
               // 侧边栏
-              SizedBox(
-                width: 100,
-                child: _buildGlassSidebar(),
-              ),
+              if (!_isFullscreen)
+                SizedBox(
+                  width: 100,
+                  child: _buildGlassSidebar(),
+                ),
               // 右侧内容区域
               Expanded(
                 flex: 1,
@@ -267,28 +339,127 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
 
   Widget _buildWebPage(String url, Key key) {
     return ClipRRect(
-        key: key,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(20), 
-          bottomLeft: Radius.circular(20)
+      key: key,
+      // 沉浸式铺满：全屏时取消圆角
+      borderRadius: _isFullscreen 
+          ? BorderRadius.zero 
+          : const BorderRadius.only(
+              topLeft: Radius.circular(20), 
+              bottomLeft: Radius.circular(20)
+            ),
+      child: InAppWebView(
+        initialUserScripts: UnmodifiableListView<UserScript>(
+          ScriptsList.map((config) => UserScript(
+            source: config.scriptContent,
+            injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+          )).toList(),
         ),
-        child: InAppWebView(
-          initialUrlRequest: URLRequest(
-            url: url.startsWith('http') 
-              ? WebUri(url) 
-              : WebUri("http://localhost:$_actualPort/$url")
-          ),
-          initialSettings: InAppWebViewSettings(
-            transparentBackground: true,
-            javaScriptEnabled: true,
-            allowFileAccessFromFileURLs: true, 
-            allowUniversalAccessFromFileURLs: true,
-          ),
-          onWebViewCreated: (controller) {
-            _webViewController = controller;
-          },
+        initialUrlRequest: URLRequest(
+          url: url.startsWith('http') 
+            ? WebUri(url) 
+            : WebUri("http://localhost:$_actualPort/$url")
         ),
-      );
+        initialSettings: InAppWebViewSettings(
+          isInspectable: true,
+          transparentBackground: true,
+          javaScriptEnabled: true,
+          allowFileAccessFromFileURLs: true, 
+          allowUniversalAccessFromFileURLs: true,
+          isElementFullscreenEnabled: true, 
+          allowsInlineMediaPlayback: true,
+          allowsPictureInPictureMediaPlayback: true,
+          builtInZoomControls: true,
+          displayZoomControls: false, 
+          iframeAllowFullscreen: true,
+          mediaPlaybackRequiresUserGesture: false,
+        ),
+        onWebViewCreated: (controller) {
+          webViewController = controller;
+
+          // 注册与 JS 交互的通道
+          controller.addJavaScriptHandler(
+            handlerName: 'toggleFullscreen',
+            callback: (args) async {
+              bool shouldFullscreen = args[0] as bool;
+              
+              if (shouldFullscreen != _isFullscreen) {
+                if (shouldFullscreen) {
+                  // --- 进入全屏模式 ---
+                  
+                  // 1. 记录当前窗口状态
+                  _wasMaximizedBeforeFullscreen = await windowManager.isMaximized();
+
+                  // 3. 【核心修复】：如果是最大化，必须先“还原”窗口状态
+                  // 只有在非最大化状态下，setBounds 才能突破任务栏的封锁
+                  if (_wasMaximizedBeforeFullscreen) {
+                    await windowManager.unmaximize();
+                    await Future.delayed(const Duration(milliseconds: 100));
+                  }
+
+                  _previousBounds = await windowManager.getBounds();
+
+                  // 4. 获取显示器信息 (多屏兼容逻辑)
+                  // 找到当前窗口中心点所在的显示器，确保全屏在正确的屏幕上
+                  List<Display> displays = await screenRetriever.getAllDisplays();
+                  Display targetDisplay = displays.first;
+                  for (var display in displays) {
+                    if (_previousBounds!.center.dx >= display.visiblePosition!.dx &&
+                        _previousBounds!.center.dx <= display.visiblePosition!.dx + display.size.width) {
+                      targetDisplay = display;
+                      break;
+                    }
+                  }
+
+                  // 5. 设置无边框和置顶
+                  await windowManager.setAsFrameless();
+                  await windowManager.setAlwaysOnTop(true);
+
+                  // 6. 强行设置为显示器的物理像素全尺寸
+                  // 这里使用 targetDisplay.visiblePosition (起始点) 和 size (宽高)
+                  await windowManager.setBounds(Rect.fromLTWH(
+                    targetDisplay.visiblePosition!.dx,
+                    targetDisplay.visiblePosition!.dy,
+                    targetDisplay.size.width,
+                    targetDisplay.size.height,
+                  ));
+
+                  setState(() { _isFullscreen = true; });
+                } else {
+                  // --- 退出全屏模式 ---
+                  
+                  await windowManager.setAlwaysOnTop(false); // 取消置顶
+                  await windowManager.setTitleBarStyle(TitleBarStyle.normal); // 恢复边框
+                  
+                  // 恢复到全屏前的状态
+                   if (_previousBounds != null) {
+                    await windowManager.setBounds(_previousBounds!);
+                  }
+                  if (_wasMaximizedBeforeFullscreen) {
+                    // 如果全屏前是最大化的，直接恢复最大化
+                    await windowManager.maximize();
+                  } else {
+                    if (_previousBounds != null) {
+                      await windowManager.setBounds(_previousBounds!);
+                    }
+                  }
+                  
+                  setState(() { _isFullscreen = false; });
+                }
+              }
+            },
+          );
+        },
+        onLoadStop: (controller, url) async {
+          // 只监听一次原生的全屏变化，绝不多余触发
+          await controller.evaluateJavascript(source: """
+            document.addEventListener('fullscreenchange', function() {
+              const isFull = document.fullscreenElement !== null;
+              window.flutter_inappwebview.callHandler('toggleFullscreen', isFull);
+            });
+          """);
+        },
+      ),
+    );
   }
 
   // 侧边栏菜单项封装
