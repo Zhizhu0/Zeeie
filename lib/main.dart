@@ -24,6 +24,8 @@ void main() async {
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
+
+    await windowManager.setPreventClose(true);
   });
 
   runApp(const MyApp());
@@ -49,7 +51,7 @@ class AuroraHomePage extends StatefulWidget {
   State<AuroraHomePage> createState() => _AuroraHomePageState();
 }
 
-class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStateMixin {
+class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStateMixin, WindowListener {
   late AnimationController _controller;
 
   // 本地服务器相关
@@ -87,6 +89,8 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
   @override
   void initState() {
     super.initState();
+
+    windowManager.addListener(this);
 
     _startServer();
     
@@ -185,9 +189,35 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
 
   @override
   void dispose() {
-    localhostServer.close();
+    windowManager.removeListener(this);
+    // localhostServer.close();
     _controller.dispose();
     super.dispose();
+  }
+
+  @override
+  void onWindowClose() async {
+    try {
+      // 1. 异步安全地关闭本地服务器 (必须 await)
+      await localhostServer.close();
+
+      // 2. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
+      if (_isFullscreen) {
+        await windowManager.setAlwaysOnTop(false);
+        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      }
+
+      // 3. 解除对窗口关闭的阻止
+      await windowManager.setPreventClose(false);
+
+      // 4. 彻底销毁并退出应用
+      await windowManager.destroy();
+    } catch (e) {
+      debugPrint("关闭时发生错误: $e");
+      // 无论如何，最后一定要保底退出
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+    }
   }
 
   @override
