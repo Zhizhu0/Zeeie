@@ -65,7 +65,7 @@ jobs:
             - **提交信息**: ${{ github.event.head_commit.message }}
             
             *注意：此版本为开发过程中的自动化快照。*
-          draft: false
+          draft: ${{ github.ref == 'refs/heads/main' }}
           prerelease: ${{ github.ref != 'refs/heads/main' }}
           files: zeeie.zip
         env:

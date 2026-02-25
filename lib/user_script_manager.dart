@@ -74,8 +74,6 @@ class UserScriptManager {
       }
     }
 
-    print(runAt);
-
     return UserScriptConfig(
       scriptContent: jsContent,
       matchPatterns: matchPatterns,
