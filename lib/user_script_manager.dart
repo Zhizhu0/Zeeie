@@ -1,5 +1,8 @@
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 /// 用于存储解析后的脚本元数据和内容
 class UserScriptConfig {
   final String scriptContent;
@@ -16,6 +19,26 @@ class UserScriptConfig {
 }
 
 class UserScriptManager {
+  static Map<String, String> _shimCache = {};
+
+  static Future<void> init() async {
+    try {
+      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+  
+      final List<String> shims = manifest.listAssets()
+        .where((String key) => key.startsWith('assets/scripts/shims/'))
+        .toList();
+      
+      for (var shimsPath in shims) {
+        String jsContent = await rootBundle.loadString(shimsPath);
+
+        String grantName = shimsPath.split('/').last.split('.').first; // 从路径中提取 grant 名称
+        _shimCache[grantName] = jsContent;
+      }
+    } catch (e) {
+      debugPrint("Failed to load user script: $e");
+    }
+  }
   /// 解析 JS 脚本字符串
   static UserScriptConfig parse(String jsContent) {
     final lines = LineSplitter.split(jsContent);
@@ -51,6 +74,8 @@ class UserScriptManager {
       }
     }
 
+    print(runAt);
+
     return UserScriptConfig(
       scriptContent: jsContent,
       matchPatterns: matchPatterns,
@@ -64,58 +89,12 @@ class UserScriptManager {
   static String generateInjectionCode(UserScriptConfig config) {
     final buffer = StringBuffer();
 
-    // 1. 构建 URL 匹配正则 (简单的将 * 转换为 .*)
-    // 如果没有 match，默认匹配所有，或者你可以决定不注入
-    if (config.matchPatterns.isNotEmpty) {
-      buffer.write('var currentUrl = window.location.href;');
-      buffer.write('var isMatch = false;');
-      for (var pattern in config.matchPatterns) {
-        // 简单转义并替换通配符，实际生产中可能需要更严谨的 glob 转 regex
-        String regexStr = pattern
-            .replaceAll('.', '\\.')
-            .replaceAll('*', '.*')
-            .replaceAll('/', '\\/');
-        buffer.write('if (new RegExp("^$regexStr").test(currentUrl)) isMatch = true;');
-      }
-      buffer.write('if (!isMatch) return;');
-    }
-
-    // 2. 注入 @grant 对应的 API (Polyfill)
-    // 利用 IIFE 防止污染全局，但 GM_ 函数通常挂载在 window 或全局作用域
     buffer.write('(function() {');
-    
-    // --- GM_addStyle ---
-    if (config.grants.contains('GM_addStyle')) {
-      buffer.write(r'''
-        window.GM_addStyle = function(css) {
-          var style = document.createElement('style');
-          style.textContent = css;
-          (document.head || document.body || document.documentElement).appendChild(style);
-        };
-      ''');
-    }
 
-    // --- GM_setValue / GM_getValue ---
-    // 使用 localStorage 模拟，前缀 'GM_STORAGE_' 防止冲突
-    if (config.grants.contains('GM_setValue') || config.grants.contains('GM_getValue')) {
-       buffer.write(r'''
-        const GM_STORAGE_PREFIX = 'GM_STORAGE_';
-        
-        window.GM_setValue = function(key, value) {
-          // 油猴允许存对象，LocalStorage 只能存字符串，所以要 JSON 序列化
-          localStorage.setItem(GM_STORAGE_PREFIX + key, JSON.stringify(value));
-        };
-
-        window.GM_getValue = function(key, defaultValue) {
-          var value = localStorage.getItem(GM_STORAGE_PREFIX + key);
-          if (value === null) return defaultValue;
-          try {
-            return JSON.parse(value);
-          } catch(e) {
-            return value; 
-          }
-        };
-      ''');
+    for (var grant in config.grants) {
+      if (_shimCache.containsKey(grant)) {
+        buffer.write(_shimCache[grant]!);
+      }
     }
 
     // 3. 注入原始代码
@@ -125,6 +104,6 @@ class UserScriptManager {
 
     buffer.write('})();'); // 结束 IIFE
 
-    return buffer.write.toString();
+    return buffer.toString();
   }
 }

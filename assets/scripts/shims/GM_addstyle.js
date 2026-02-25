@@ -1,4 +1,4 @@
-GM_addStyle = function(css) {
+const GM_addStyle = function(css) {
     var style = document.createElement('style');
     style.textContent = css;
 

@@ -75,6 +75,7 @@ flutter:
     - assets/icons/bilibili.svg
     - assets/icons/pixiv.svg
     - assets/scripts/
+    - assets/scripts/shims/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

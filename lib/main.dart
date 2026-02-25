@@ -28,6 +28,8 @@ void main() async {
     await windowManager.setPreventClose(true);
   });
 
+  await UserScriptManager.init();
+
   runApp(const MyApp());
 }
 
@@ -39,19 +41,19 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      home: const AuroraHomePage(),
+      home: const HomePage(),
     );
   }
 }
 
-class AuroraHomePage extends StatefulWidget {
-  const AuroraHomePage({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<AuroraHomePage> createState() => _AuroraHomePageState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStateMixin, WindowListener {
+class _HomePageState extends State<HomePage> with TickerProviderStateMixin, WindowListener {
   late AnimationController _controller;
 
   // 本地服务器相关
@@ -147,13 +149,10 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
 
   Future<void> _loadUserScripts() async {
     try {
-      // 假设你的脚本放在 assets/scripts/bilibili_ad_hidden.js
-      // 记得在 pubspec.yaml 注册 assets
-
       final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
   
       final List<String> scripts = manifest.listAssets()
-        .where((String key) => key.startsWith('assets/scripts/'))
+        .where((String key) => key.startsWith('assets/scripts/') && !key.startsWith('assets/scripts/shims/'))
         .toList();
       
       for (var scriptPath in scripts) {
@@ -162,26 +161,6 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
         var config = UserScriptManager.parse(jsContent);
         ScriptsList.add(config);
       }
-      // String jsContent = await rootBundle.loadString('assets/scripts/bilibili_ad_hidden.js');
-      
-      // var config = UserScriptManager.parse(jsContent);
-      // print(config);
-      // var finalJs = UserScriptManager.generateInjectionCode(config);
-
-      // // 映射 RunAt 字符串到枚举
-      // UserScriptInjectionTime injectionTime = UserScriptInjectionTime.AT_DOCUMENT_END;
-      // if (config.runAt.contains('start')) {
-      //   injectionTime = UserScriptInjectionTime.AT_DOCUMENT_START;
-      // }
-
-      // setState(() {
-      //   _biliUserScript = UserScript(
-      //     source: finalJs,
-      //     injectionTime: injectionTime,
-      //     // 这里如果不设置 forMainFrameOnly: true，可能会注入到 iframe 里的广告导致报错或重复执行
-      //     forMainFrameOnly: true, 
-      //   );
-      // });
     } catch (e) {
       debugPrint("Failed to load user script: $e");
     }
@@ -380,8 +359,8 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
       child: InAppWebView(
         initialUserScripts: UnmodifiableListView<UserScript>(
           ScriptsList.map((config) => UserScript(
-            source: config.scriptContent,
-            injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            source: UserScriptManager.generateInjectionCode(config),
+            injectionTime: config.runAt == "document-start" ? UserScriptInjectionTime.AT_DOCUMENT_START : UserScriptInjectionTime.AT_DOCUMENT_END,
           )).toList(),
         ),
         initialUrlRequest: URLRequest(
@@ -480,7 +459,7 @@ class _AuroraHomePageState extends State<AuroraHomePage> with TickerProviderStat
           );
         },
         onLoadStop: (controller, url) async {
-          // 只监听一次原生的全屏变化，绝不多余触发
+          // 监听全屏变化
           await controller.evaluateJavascript(source: """
             document.addEventListener('fullscreenchange', function() {
               const isFull = document.fullscreenElement !== null;

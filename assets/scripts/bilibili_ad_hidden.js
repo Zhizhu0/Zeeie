@@ -8,55 +8,8 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @run-at       document-end
+// @run-at       document-start
 // ==/UserScript==
-
-(function() {
-    GM_addStyle = function(css) {
-        var style = document.createElement('style');
-        style.textContent = css;
-
-        // 1. 尝试直接获取挂载点
-        var target = document.head || document.documentElement;
-
-        if (target) {
-            // 如果挂载点已存在，直接插入
-            target.appendChild(style);
-        } else {
-            // 2. 如果挂载点不存在（AT_DOCUMENT_START 常见情况），这就需要“蹲守”
-            // 创建一个观察者，一旦 <head> 或 <html> 出现就立即插入
-            var observer = new MutationObserver(function(mutations, obs) {
-                var target = document.head || document.documentElement;
-                if (target) {
-                    target.appendChild(style);
-                    obs.disconnect(); // 任务完成，停止观察
-                }
-            });
-            
-            // 开始观察 document 的子节点变化
-            observer.observe(document, { childList: true, subtree: true });
-        }
-        
-        // 返回 style 元素以便后续操作（符合 GM_addStyle 标准）
-        return style;
-    };
-    const GM_STORAGE_PREFIX = 'GM_STORAGE_';
-    
-    GM_setValue = function(key, value) {
-        // 油猴允许存对象，LocalStorage 只能存字符串，所以要 JSON 序列化
-        localStorage.setItem(GM_STORAGE_PREFIX + key, JSON.stringify(value));
-    };
-
-    GM_getValue = function(key, defaultValue) {
-        var value = localStorage.getItem(GM_STORAGE_PREFIX + key);
-        if (value === null) return defaultValue;
-        try {
-            return JSON.parse(value);
-        } catch(e) {
-            return value; 
-        }
-    };
-})();
 
 (function() {
     'use strict';
