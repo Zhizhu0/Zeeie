@@ -1,4 +1,4 @@
-import 'dart:math' as math;
+﻿import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'dart:io';
@@ -8,6 +8,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
 import 'user_script_manager.dart';
+import 'user_script_storage.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 
@@ -158,7 +159,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
       for (var scriptPath in scripts) {
         String jsContent = await rootBundle.loadString(scriptPath);
         
-        var config = UserScriptManager.parse(jsContent);
+        var config = UserScriptManager.parse(jsContent, scriptPath: scriptPath);
         ScriptsList.add(config);
       }
     } catch (e) {
@@ -384,91 +385,105 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         ),
         onWebViewCreated: (controller) {
           webViewController = controller;
-
-          // 注册与 JS 交互的通道
-          controller.addJavaScriptHandler(
-            handlerName: 'toggleFullscreen',
-            callback: (args) async {
-              bool shouldFullscreen = args[0] as bool;
-              
-              if (shouldFullscreen != _isFullscreen) {
-                if (shouldFullscreen) {
-                  // --- 进入全屏模式 ---
-                  
-                  // 1. 记录当前窗口状态
-                  _wasMaximizedBeforeFullscreen = await windowManager.isMaximized();
-
-                  // 3. 【核心修复】：如果是最大化，必须先“还原”窗口状态
-                  // 只有在非最大化状态下，setBounds 才能突破任务栏的封锁
-                  if (_wasMaximizedBeforeFullscreen) {
-                    await windowManager.unmaximize();
-                    await Future.delayed(const Duration(milliseconds: 100));
-                  }
-
-                  _previousBounds = await windowManager.getBounds();
-
-                  // 4. 获取显示器信息 (多屏兼容逻辑)
-                  // 找到当前窗口中心点所在的显示器，确保全屏在正确的屏幕上
-                  List<Display> displays = await screenRetriever.getAllDisplays();
-                  Display targetDisplay = displays.first;
-                  for (var display in displays) {
-                    if (_previousBounds!.center.dx >= display.visiblePosition!.dx &&
-                        _previousBounds!.center.dx <= display.visiblePosition!.dx + display.size.width) {
-                      targetDisplay = display;
-                      break;
-                    }
-                  }
-
-                  // 5. 设置无边框和置顶
-                  await windowManager.setAsFrameless();
-                  await windowManager.setAlwaysOnTop(true);
-
-                  // 6. 强行设置为显示器的物理像素全尺寸
-                  // 这里使用 targetDisplay.visiblePosition (起始点) 和 size (宽高)
-                  await windowManager.setBounds(Rect.fromLTWH(
-                    targetDisplay.visiblePosition!.dx,
-                    targetDisplay.visiblePosition!.dy,
-                    targetDisplay.size.width,
-                    targetDisplay.size.height,
-                  ));
-
-                  setState(() { _isFullscreen = true; });
-                } else {
-                  // --- 退出全屏模式 ---
-                  
-                  await windowManager.setAlwaysOnTop(false); // 取消置顶
-                  await windowManager.setTitleBarStyle(TitleBarStyle.normal); // 恢复边框
-                  
-                  // 恢复到全屏前的状态
-                   if (_previousBounds != null) {
-                    await windowManager.setBounds(_previousBounds!);
-                  }
-                  if (_wasMaximizedBeforeFullscreen) {
-                    // 如果全屏前是最大化的，直接恢复最大化
-                    await windowManager.maximize();
-                  } else {
-                    if (_previousBounds != null) {
-                      await windowManager.setBounds(_previousBounds!);
-                    }
-                  }
-                  
-                  setState(() { _isFullscreen = false; });
-                }
-              }
-            },
-          );
-        },
-        onLoadStop: (controller, url) async {
-          // 监听全屏变化
-          await controller.evaluateJavascript(source: """
-            document.addEventListener('fullscreenchange', function() {
-              const isFull = document.fullscreenElement !== null;
-              window.flutter_inappwebview.callHandler('toggleFullscreen', isFull);
-            });
-          """);
+          _registerWebViewHandlers(controller);
         },
       ),
     );
+  }
+
+  void _registerWebViewHandlers(InAppWebViewController controller) {
+    controller.addJavaScriptHandler(
+      handlerName: 'gmStorageSet',
+      callback: (args) async {
+        if (args.length < 3) return false;
+        final scriptId = args[0]?.toString() ?? '';
+        final key = args[1]?.toString() ?? '';
+        final encodedValue = args[2];
+        if (scriptId.isEmpty || key.isEmpty) return false;
+        if (!UserScriptManager.scriptHasGrant(scriptId, 'GM_setValue')) return false;
+        await UserScriptStorage.instance.setValue(scriptId, key, encodedValue);
+        return true;
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'gmStorageDelete',
+      callback: (args) async {
+        if (args.length < 2) return false;
+        final scriptId = args[0]?.toString() ?? '';
+        final key = args[1]?.toString() ?? '';
+        if (scriptId.isEmpty || key.isEmpty) return false;
+        if (!UserScriptManager.scriptHasGrant(scriptId, 'GM_deleteValue')) return false;
+        await UserScriptStorage.instance.deleteValue(scriptId, key);
+        return true;
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'gmToggleFullscreen',
+      callback: (args) async {
+        if (args.length < 2) return false;
+        final scriptId = args[0]?.toString() ?? '';
+        if (scriptId.isEmpty) return false;
+        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_toggleFullscreen')) return false;
+        final shouldFullscreen = args[1] == true;
+        await _handleToggleFullscreen(shouldFullscreen);
+        return true;
+      },
+    );
+  }
+
+  Future<void> _handleToggleFullscreen(bool shouldFullscreen) async {
+    if (shouldFullscreen != _isFullscreen) {
+      if (shouldFullscreen) {
+        _wasMaximizedBeforeFullscreen = await windowManager.isMaximized();
+
+        if (_wasMaximizedBeforeFullscreen) {
+          await windowManager.unmaximize();
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+
+        _previousBounds = await windowManager.getBounds();
+
+        List<Display> displays = await screenRetriever.getAllDisplays();
+        Display targetDisplay = displays.first;
+        for (var display in displays) {
+          if (_previousBounds!.center.dx >= display.visiblePosition!.dx &&
+              _previousBounds!.center.dx <= display.visiblePosition!.dx + display.size.width) {
+            targetDisplay = display;
+            break;
+          }
+        }
+
+        await windowManager.setAsFrameless();
+        await windowManager.setAlwaysOnTop(true);
+
+        await windowManager.setBounds(Rect.fromLTWH(
+          targetDisplay.visiblePosition!.dx,
+          targetDisplay.visiblePosition!.dy,
+          targetDisplay.size.width,
+          targetDisplay.size.height,
+        ));
+
+        setState(() { _isFullscreen = true; });
+      } else {
+        await windowManager.setAlwaysOnTop(false);
+        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+
+        if (_previousBounds != null) {
+          await windowManager.setBounds(_previousBounds!);
+        }
+        if (_wasMaximizedBeforeFullscreen) {
+          await windowManager.maximize();
+        } else {
+          if (_previousBounds != null) {
+            await windowManager.setBounds(_previousBounds!);
+          }
+        }
+
+        setState(() { _isFullscreen = false; });
+      }
+    }
   }
 
   // 侧边栏菜单项封装
