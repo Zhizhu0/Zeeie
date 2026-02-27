@@ -1,107 +1,178 @@
-<!-- assets/desktop/index.html -->
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>设置</title>
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            width: 100vw;
-            height: 100vh;
-            overflow: hidden;
-            font-family: 'Segoe UI', sans-serif;
-            color: white;
-            /* 动态背景容器 */
-            background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e, #000000);
-            background-size: 400% 400%;
-            animation: gradientBG 15s ease infinite;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* 紫黑流光动画 */
-        @keyframes gradientBG {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-
-        /* 玻璃拟态图标容器 */
-        .app-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 40px;
-            padding: 40px;
-            background: rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-        }
-
-        .app-icon {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            cursor: pointer;
-            transition: transform 0.2s;
-        }
-
-        .app-icon:hover {
-            transform: scale(1.1);
-        }
-
-        .icon-box {
-            width: 80px;
-            height: 80px;
-            border-radius: 18px;
-            background: rgba(255, 255, 255, 0.1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 30px;
-            margin-bottom: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-
-        /* 不同的图标颜色 */
-        .bili { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
-        .pixiv { background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%); }
+      :root {
+        color-scheme: dark;
+        --bg: #0f172a;
+        --panel: #111827;
+        --panel-2: #0b1220;
+        --border: rgba(255, 255, 255, 0.08);
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #22d3ee;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--text);
+        background: radial-gradient(1200px 600px at 20% -10%, #1e293b, transparent),
+          radial-gradient(1000px 500px at 120% 0%, #0e7490, transparent),
+          var(--bg);
+        min-height: 100vh;
+      }
+      .page {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 24px 60px;
+      }
+      .title {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 0 0 18px;
+      }
+      .section {
+        background: linear-gradient(180deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 18px 8px;
+        margin-bottom: 18px;
+      }
+      .section h2 {
+        font-size: 16px;
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .subsection {
+        margin-bottom: 18px;
+      }
+      .subsection h3 {
+        font-size: 14px;
+        margin: 14px 0 10px;
+        color: var(--text);
+        font-weight: 600;
+      }
+      .script-header,
+      .script-row {
+        display: grid;
+        grid-template-columns: 2.6fr 1.2fr 0.8fr 0.6fr;
+        gap: 12px;
+        align-items: center;
+      }
+      .script-header {
+        font-size: 12px;
+        color: var(--muted);
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 6px;
+      }
+      .script-row {
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .script-row:last-child {
+        border-bottom: none;
+      }
+      .script-name {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .script-name .primary {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .script-name .secondary {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .empty {
+        padding: 12px 8px 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+      }
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background-color: #374151;
+        transition: 0.2s;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+      }
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 14px;
+        width: 14px;
+        left: 3px;
+        top: 2px;
+        background-color: #e5e7eb;
+        transition: 0.2s;
+        border-radius: 50%;
+      }
+      input:checked + .slider {
+        background-color: rgba(34, 211, 238, 0.35);
+        border-color: rgba(34, 211, 238, 0.6);
+      }
+      input:checked + .slider:before {
+        transform: translateX(16px);
+        background: var(--accent);
+      }
+      input:disabled + .slider {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
+    <div class="page">
+      <div class="title">设置</div>
 
-    <div class="app-grid">
-        <!-- Bilibili 图标 -->
-        <div class="app-icon">
-            <div class="icon-box bili">📺</div>
-            <span>Bilibili</span>
+      <div class="section">
+        <h2>脚本管理</h2>
+
+        <div class="subsection">
+          <h3>系统脚本</h3>
+          <div class="script-header">
+            <div>脚本</div>
+            <div>作者</div>
+            <div>版本</div>
+            <div>启用</div>
+          </div>
+          <div id="system-script-list"></div>
+          <div id="system-empty" class="empty" hidden>无系统脚本</div>
         </div>
 
-        <!-- Pixiv 图标 -->
-        <div class="app-icon">
-            <div class="icon-box pixiv">🎨</div>
-            <span>Pixiv</span>
+        <div class="subsection">
+          <h3>用户脚本</h3>
+          <div class="script-header">
+            <div>脚本</div>
+            <div>作者</div>
+            <div>版本</div>
+            <div>启用</div>
+          </div>
+          <div id="user-script-list"></div>
+          <div id="user-empty" class="empty">无用户脚本</div>
         </div>
-        
-        <!-- 更多图标... -->
+      </div>
     </div>
-
-    <script>
-        // 核心：点击图标后，通过 JS Bridge 通知 Flutter
-        function openApp(title, url) {
-            if (window.flutter_inappwebview) {
-                window.flutter_inappwebview.callHandler('launchApp', {
-                    'title': title,
-                    'url': url
-                });
-            } else {
-                console.log("Flutter environment not detected");
-            }
-        }
-    </script>
-</body>
+  </body>
 </html>

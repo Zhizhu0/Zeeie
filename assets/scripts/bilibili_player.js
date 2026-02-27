@@ -6,6 +6,7 @@
 // @author       You
 // @match        https://www.bilibili.com/*
 // @grant        GM_addStyle
+// @run-at       document-end
 // ==/UserScript==
 
 (function() {

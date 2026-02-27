@@ -80,7 +80,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
   late List<AppItem> myApps;
 
   UserScript? _biliUserScript;
-  List<UserScriptConfig> ScriptsList = [];
+  List<UserScriptConfig> _allScripts = [];
+  List<UserScriptConfig> _enabledScripts = [];
 
   final GlobalKey webViewKey = GlobalKey();
   InAppWebViewController? webViewController;
@@ -155,13 +156,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
       final List<String> scripts = manifest.listAssets()
         .where((String key) => key.startsWith('assets/scripts/') && !key.startsWith('assets/scripts/shims/'))
         .toList();
-      
+      _allScripts.clear();
+
       for (var scriptPath in scripts) {
         String jsContent = await rootBundle.loadString(scriptPath);
         
-        var config = UserScriptManager.parse(jsContent, scriptPath: scriptPath);
-        ScriptsList.add(config);
+        var config = UserScriptManager.parse(
+          jsContent,
+          scriptPath: scriptPath,
+          sourceType: 'system',
+        );
+        _allScripts.add(config);
       }
+      _rebuildEnabledScripts();
     } catch (e) {
       debugPrint("Failed to load user script: $e");
     }
@@ -359,7 +366,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
             ),
       child: InAppWebView(
         initialUserScripts: UnmodifiableListView<UserScript>(
-          ScriptsList.map((config) => UserScript(
+          _enabledScripts.map((config) => UserScript(
             source: UserScriptManager.generateInjectionCode(config),
             injectionTime: config.runAt == "document-start" ? UserScriptInjectionTime.AT_DOCUMENT_START : UserScriptInjectionTime.AT_DOCUMENT_END,
           )).toList(),
@@ -393,6 +400,59 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   void _registerWebViewHandlers(InAppWebViewController controller) {
     controller.addJavaScriptHandler(
+      handlerName: 'zeeieGetUserScriptList',
+      callback: (args) async {
+        final scriptId = args.isNotEmpty ? args[0]?.toString() ?? '' : '';
+        if (scriptId.isEmpty) return <dynamic>[];
+        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_getUserScriptList')) return <dynamic>[];
+
+        final result = _allScripts.map((config) {
+          final lock = _isLockEffective(config);
+          final enabled = _isScriptEnabled(config);
+          return {
+            'scriptId': config.scriptId,
+            'namespace': config.namespace,
+            'name': config.name,
+            'author': config.author,
+            'version': config.version,
+            'enabled': enabled,
+            'lock': lock,
+            'type': config.sourceType,
+          };
+        }).toList();
+        return result;
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'zeeieSetUserScriptEnable',
+      callback: (args) async {
+        if (args.length < 3) return false;
+        final callerScriptId = args[0]?.toString() ?? '';
+        final targetScriptId = args[1]?.toString() ?? '';
+        final enabled = args[2] == true;
+        if (callerScriptId.isEmpty || targetScriptId.isEmpty) return false;
+        if (!UserScriptManager.scriptHasGrant(callerScriptId, 'Zeeie_setUserScriptEnable')) return false;
+
+        UserScriptConfig? config;
+        for (final s in _allScripts) {
+          if (s.scriptId == targetScriptId) {
+            config = s;
+            break;
+          }
+        }
+        if (config == null) return false;
+        if (_isLockEffective(config)) return false;
+
+        await UserScriptStorage.instance.setScriptEnabled(targetScriptId, enabled);
+        setState(() {
+          _rebuildEnabledScripts();
+        });
+        return true;
+      },
+    );
+
+    controller.addJavaScriptHandler(
       handlerName: 'gmStorageSet',
       callback: (args) async {
         if (args.length < 3) return false;
@@ -420,7 +480,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
     );
 
     controller.addJavaScriptHandler(
-      handlerName: 'gmToggleFullscreen',
+      handlerName: 'zeeieToggleFullscreen',
       callback: (args) async {
         if (args.length < 2) return false;
         final scriptId = args[0]?.toString() ?? '';
@@ -431,6 +491,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         return true;
       },
     );
+  }
+
+  bool _isLockEffective(UserScriptConfig config) {
+    return config.sourceType == 'system' && config.lock == true;
+  }
+
+  bool _isScriptEnabled(UserScriptConfig config) {
+    if (_isLockEffective(config)) return true;
+    return UserScriptStorage.instance.getScriptEnabled(config.scriptId, defaultValue: true);
+  }
+
+  void _rebuildEnabledScripts() {
+    _enabledScripts = _allScripts.where((config) => _isScriptEnabled(config)).toList();
   }
 
   Future<void> _handleToggleFullscreen(bool shouldFullscreen) async {

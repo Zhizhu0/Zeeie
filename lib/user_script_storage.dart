@@ -10,6 +10,8 @@ class UserScriptStorage {
 
   static final UserScriptStorage instance = UserScriptStorage._();
 
+  static const String _enabledKey = '__zeeie_enabled__';
+
   final Map<String, Map<String, dynamic>> _data = {};
   bool _initialized = false;
   File? _storageFile;
@@ -18,7 +20,7 @@ class UserScriptStorage {
   Future<void> init() async {
     if (_initialized) return;
     final dir = await getApplicationSupportDirectory();
-    _storageFile = File(p.join(dir.path, 'gm_storage.json'));
+    _storageFile = File(p.join(dir.path, 'user_script_storage.json'));
     if (await _storageFile!.exists()) {
       try {
         final raw = await _storageFile!.readAsString();
@@ -43,6 +45,23 @@ class UserScriptStorage {
     final existing = _data[scriptId];
     if (existing == null) return <String, dynamic>{};
     return Map<String, dynamic>.from(existing);
+  }
+
+  bool getScriptEnabled(String scriptId, {bool defaultValue = true}) {
+    final existing = _data[scriptId];
+    if (existing == null) return defaultValue;
+    final value = existing[_enabledKey];
+    if (value is bool) return value;
+    return defaultValue;
+  }
+
+  Future<void> setScriptEnabled(String scriptId, bool enabled) async {
+    if (!_initialized) {
+      await init();
+    }
+    final scriptMap = _data.putIfAbsent(scriptId, () => <String, dynamic>{});
+    scriptMap[_enabledKey] = enabled;
+    _scheduleFlush();
   }
 
   Future<void> setValue(String scriptId, String key, dynamic encodedValue) async {

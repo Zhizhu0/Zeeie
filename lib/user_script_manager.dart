@@ -11,6 +11,13 @@ class UserScriptConfig {
   final Set<String> grants;
   final String runAt;
   final String scriptId;
+  final String name;
+  final String namespace;
+  final String author;
+  final String version;
+  final bool lock;
+  final String sourceType; // system | user
+  final String? scriptPath;
 
   UserScriptConfig({
     required this.scriptContent,
@@ -18,6 +25,13 @@ class UserScriptConfig {
     required this.grants,
     required this.runAt, // document-start, document-end
     required this.scriptId,
+    required this.name,
+    required this.namespace,
+    required this.author,
+    required this.version,
+    required this.lock,
+    required this.sourceType,
+    required this.scriptPath,
   });
 }
 
@@ -55,13 +69,20 @@ class UserScriptManager {
     }
   }
   /// 解析 JS 脚本字符串
-  static UserScriptConfig parse(String jsContent, {String? scriptPath}) {
+  static UserScriptConfig parse(
+    String jsContent, {
+    String? scriptPath,
+    String sourceType = 'system',
+  }) {
     final lines = LineSplitter.split(jsContent);
     final matchPatterns = <String>[];
     final grants = <String>{};
     String runAt = 'document-end';
     String scriptName = '';
     String scriptNamespace = ''; // 默认值
+    String scriptAuthor = '';
+    String scriptVersion = '';
+    bool scriptLock = false;
 
     bool inHeader = false;
 
@@ -96,6 +117,17 @@ class UserScriptManager {
           case "namespace":
             if (scriptNamespace.isEmpty && value.isNotEmpty) scriptNamespace = value;
             break;
+          case "author":
+            if (scriptAuthor.isEmpty && value.isNotEmpty) scriptAuthor = value;
+            break;
+          case "version":
+            if (scriptVersion.isEmpty && value.isNotEmpty) scriptVersion = value;
+            break;
+          case "lock":
+            if (value.isNotEmpty) {
+              scriptLock = value.toLowerCase() == 'true';
+            }
+            break;
         }
       }
     }
@@ -109,6 +141,13 @@ class UserScriptManager {
       grants: grants,
       runAt: runAt,
       scriptId: scriptId,
+      name: scriptName,
+      namespace: scriptNamespace,
+      author: scriptAuthor,
+      version: scriptVersion,
+      lock: scriptLock,
+      sourceType: sourceType,
+      scriptPath: scriptPath,
     );
   }
 
