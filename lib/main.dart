@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
@@ -8,12 +7,13 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'user_script_manager.dart';
+import 'user_script_repository.dart';
 import 'user_script_storage.dart';
+import 'webview/download_service.dart';
+import 'webview/fullscreen_controller.dart';
+import 'webview/webview_bridge.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:screen_retriever/screen_retriever.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,7 +24,7 @@ void main() async {
     size: Size(800, 600),
     center: true,
   );
-  
+
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
@@ -33,6 +33,7 @@ void main() async {
   });
 
   await UserScriptManager.init();
+  await UserScriptRepository.instance.init();
 
   runApp(const MyApp());
 }
@@ -57,7 +58,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin, WindowListener {
+class _HomePageState extends State<HomePage>
+    with TickerProviderStateMixin, WindowListener {
   late AnimationController _controller;
 
   // 本地服务器相关
@@ -77,45 +79,59 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
   // --- 页面控制逻辑 ---
   int _currentIndex = 0;
 
-  // --- InAppWebView 控制器 ---
-  InAppWebViewController? _webViewController;
-
   late List<AppItem> myApps;
 
-  UserScript? _biliUserScript;
-  List<UserScriptConfig> _allScripts = [];
+  final List<UserScriptConfig> _allScripts = [];
   List<UserScriptConfig> _enabledScripts = [];
+  int _webViewRevision = 0;
 
-  final GlobalKey webViewKey = GlobalKey();
-  InAppWebViewController? webViewController;
-  bool _isFullscreen = false;
-
-  Rect? _previousBounds;
-  bool _wasMaximizedBeforeFullscreen = false; 
+  late final FullscreenController _fullscreenController;
+  late final DownloadService _downloadService;
+  late final WebViewBridge _webViewBridge;
 
   @override
   void initState() {
     super.initState();
 
+    _fullscreenController = FullscreenController();
+    _downloadService = DownloadService();
+    _downloadService.init();
+    _webViewBridge = WebViewBridge(
+      getAllScripts: () => _allScripts,
+      isLockEffective: _isLockEffective,
+      isScriptEnabled: _isScriptEnabled,
+      onScriptSettingsChanged: _handleScriptSettingsChanged,
+      reloadUserScripts: _reloadUserScripts,
+      onFullscreenChanged: _handleFullscreenChanged,
+      fullscreenController: _fullscreenController,
+      downloadService: _downloadService,
+    );
+
     windowManager.addListener(this);
 
     _startServer();
-    
+
     // 初始化动画
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 15),
     )..repeat(reverse: true);
 
-    _blob1Anim = Tween<Offset>(
-      begin: const Offset(-100, 0),
-      end: const Offset(100, 50),
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine));
+    _blob1Anim =
+        Tween<Offset>(
+          begin: const Offset(-100, 0),
+          end: const Offset(100, 50),
+        ).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine),
+        );
 
-    _blob2Anim = Tween<Offset>(
-      begin: const Offset(50, 0),
-      end: const Offset(-50, 100),
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutQuad));
+    _blob2Anim =
+        Tween<Offset>(
+          begin: const Offset(50, 0),
+          end: const Offset(-50, 100),
+        ).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOutQuad),
+        );
 
     _blob3Anim = Tween<Offset>(
       begin: const Offset(0, -50),
@@ -134,8 +150,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
     // 初始化 App 列表
     myApps = [
-      _buildAppItem("bilibili", "assets/icons/bilibili.svg", "https://www.bilibili.com/"),
-      _buildAppItem("Pixiv", "assets/icons/pixiv.svg", "https://www.pixiv.net/"),
+      _buildAppItem(
+        "bilibili",
+        "assets/icons/bilibili.svg",
+        "https://www.bilibili.com/",
+      ),
+      _buildAppItem(
+        "Pixiv",
+        "assets/icons/pixiv.svg",
+        "https://www.pixiv.net/",
+      ),
+      _buildAppItem("下载管理", Icons.download_rounded, "assets/web/downloads.html"),
       _buildAppItem("设置", Icons.settings, "assets/web/settings.html"),
     ];
 
@@ -154,33 +179,73 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   Future<void> _loadUserScripts() async {
     try {
-      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
-  
-      final List<String> scripts = manifest.listAssets()
-        .where((String key) => key.startsWith('assets/scripts/') && !key.startsWith('assets/scripts/shims/'))
-        .toList();
-      _allScripts.clear();
+      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(
+        rootBundle,
+      );
+
+      final List<String> scripts = manifest
+          .listAssets()
+          .where(
+            (String key) =>
+                key.startsWith('assets/scripts/') &&
+                !key.startsWith('assets/scripts/shims/'),
+          )
+          .toList();
+      final nextScripts = <UserScriptConfig>[];
 
       for (var scriptPath in scripts) {
         String jsContent = await rootBundle.loadString(scriptPath);
-        
+
         var config = UserScriptManager.parse(
           jsContent,
           scriptPath: scriptPath,
           sourceType: 'system',
         );
-        _allScripts.add(config);
+        nextScripts.add(config);
       }
-      _rebuildEnabledScripts();
+
+      for (final stored in UserScriptRepository.instance.listScripts()) {
+        final config = UserScriptManager.parse(
+          stored.content,
+          scriptPath: stored.scriptId,
+          scriptIdOverride: stored.scriptId,
+          sourceType: 'user',
+        );
+        nextScripts.add(config);
+      }
+
+      if (!mounted) {
+        _allScripts
+          ..clear()
+          ..addAll(nextScripts);
+        _rebuildEnabledScripts();
+        return;
+      }
+
+      setState(() {
+        _allScripts
+          ..clear()
+          ..addAll(nextScripts);
+        _rebuildEnabledScripts();
+      });
     } catch (e) {
       debugPrint("Failed to load user script: $e");
     }
+  }
+
+  Future<void> _reloadUserScripts() async {
+    await _loadUserScripts();
+    if (!mounted) return;
+    setState(() {
+      _webViewRevision++;
+    });
   }
 
   @override
   void dispose() {
     windowManager.removeListener(this);
     // localhostServer.close();
+    _downloadService.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -192,10 +257,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
       await localhostServer.close();
 
       // 2. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
-      if (_isFullscreen) {
-        await windowManager.setAlwaysOnTop(false);
-        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
-      }
+      await _fullscreenController.restoreWindowBeforeClose();
 
       // 3. 解除对窗口关闭的阻止
       await windowManager.setPreventClose(false);
@@ -262,20 +324,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
           // --- 层2: 星空粒子 ---
           Positioned.fill(
-            child: CustomPaint(
-              painter: StarFieldPainter(_controller, _stars),
-            ),
+            child: CustomPaint(painter: StarFieldPainter(_controller, _stars)),
           ),
 
           // --- 层3: 页面布局 (Sidebar + IndexedStack) ---
           Row(
             children: [
               // 侧边栏
-              if (!_isFullscreen)
-                SizedBox(
-                  width: 100,
-                  child: _buildGlassSidebar(),
-                ),
+              if (!_fullscreenController.isFullscreen)
+                SizedBox(width: 100, child: _buildGlassSidebar()),
               // 右侧内容区域
               Expanded(
                 flex: 1,
@@ -287,26 +344,35 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
                       padding: const EdgeInsets.all(40),
                       child: GridView.builder(
                         padding: const EdgeInsets.all(24),
-                        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 100,
-                          mainAxisSpacing: 20,
-                          crossAxisSpacing: 20,
-                          childAspectRatio: 0.8,
-                        ),
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: 100,
+                              mainAxisSpacing: 20,
+                              crossAxisSpacing: 20,
+                              childAspectRatio: 0.8,
+                            ),
                         itemCount: myApps.length,
                         itemBuilder: (context, index) {
                           return _buildGridItem(myApps[index]);
                         },
                       ),
                     ),
-                    
-                    for (var item in _sidebarItems) ... [
-                      _buildWebPage(item.url, ValueKey(item.url))
-                    ]
+
+                    for (var item in _sidebarItems) ...[
+                      _buildWebPage(
+                        item.url,
+                        ValueKey('${item.url}::$_webViewRevision'),
+                      ),
+                    ],
                   ],
                 ),
               ),
             ],
+          ),
+          Positioned(
+            right: 24,
+            bottom: 24,
+            child: _buildDownloadOverlay(),
           ),
         ],
       ),
@@ -317,10 +383,178 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
     return Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: color,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    );
+  }
+
+  Widget _buildDownloadOverlay() {
+    return AnimatedBuilder(
+      animation: _downloadService,
+      builder: (context, _) {
+        final active = _downloadService.activeRecords;
+        final toast = _downloadService.latestToast;
+        final showActiveOverlay =
+            active.isNotEmpty && _downloadService.shouldShowActiveOverlay;
+        if (!showActiveOverlay && toast == null) {
+          return const SizedBox.shrink();
+        }
+
+        if (showActiveOverlay) {
+          final visibleItems = active.take(3).toList();
+          return ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: _buildFloatingPanel(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.download_rounded,
+                        color: Colors.white,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '正在下载 ${active.length} 项',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () {
+                          _downloadService.dismissActiveOverlay();
+                          _openOrFocusApp(
+                            '下载管理',
+                            Icons.download_rounded,
+                            'assets/web/downloads.html',
+                          );
+                        },
+                        child: const Text('查看'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  for (final item in visibleItems) ...[
+                    _buildDownloadOverlayItem(item),
+                    if (item != visibleItems.last) const SizedBox(height: 10),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }
+
+        return ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 280),
+          child: _buildFloatingPanel(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  toast!.type == 'success'
+                      ? Icons.check_circle_outline
+                      : toast.type == 'error'
+                      ? Icons.error_outline
+                      : Icons.info_outline,
+                  color: toast.type == 'success'
+                      ? Colors.greenAccent
+                      : toast.type == 'error'
+                      ? Colors.orangeAccent
+                      : Colors.white70,
+                  size: 20,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        toast.title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        toast.message,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFloatingPanel({required Widget child}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color.fromRGBO(15, 23, 42, 0.8),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: const Color.fromRGBO(255, 255, 255, 0.12),
+            ),
+          ),
+          child: child,
+        ),
       ),
+    );
+  }
+
+  Widget _buildDownloadOverlayItem(Map<String, dynamic> item) {
+    final progressValue = ((item['progress'] as num?)?.toDouble() ?? 0) / 100;
+    final fileName =
+        item['fileName']?.toString() ??
+        item['requestedFileName']?.toString() ??
+        '未命名下载';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            minHeight: 6,
+            value: progressValue > 0 ? progressValue.clamp(0.0, 1.0) : null,
+            backgroundColor: const Color.fromRGBO(255, 255, 255, 0.08),
+            valueColor: const AlwaysStoppedAnimation<Color>(
+              Colors.lightBlueAccent,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -334,8 +568,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
             color: Color.fromRGBO(255, 255, 255, 0.05),
             border: Border(
               right: BorderSide(
-                color: Color.fromRGBO(255, 255, 255, 0.1), 
-                width: 1
+                color: Color.fromRGBO(255, 255, 255, 0.1),
+                width: 1,
               ),
             ),
           ),
@@ -343,7 +577,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
             child: Column(
               children: [
                 const SizedBox(height: 30),
-                _buildMenuItem(SidebarItem(label: "主页", url: "", icon: Icons.home_filled), 0),
+                _buildMenuItem(
+                  SidebarItem(label: "主页", url: "", icon: Icons.home_filled),
+                  0,
+                ),
 
                 for (int i = 0; i < _sidebarItems.length; i++) ...[
                   const SizedBox(height: 20),
@@ -351,7 +588,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
                 ],
               ],
             ),
-          )
+          ),
         ),
       ),
     );
@@ -360,43 +597,38 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
   Widget _buildWebPage(String url, Key key) {
     return ClipRRect(
       key: key,
-      // 沉浸式铺满：全屏时取消圆角
-      borderRadius: _isFullscreen 
-          ? BorderRadius.zero 
-          : const BorderRadius.only(
-              topLeft: Radius.circular(20), 
-              bottomLeft: Radius.circular(20)
-            ),
       child: InAppWebView(
         initialUserScripts: UnmodifiableListView<UserScript>(
-          _enabledScripts.map((config) => UserScript(
-            source: UserScriptManager.generateInjectionCode(config),
-            injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-            forMainFrameOnly: config.forMainFrameOnly,
-          )).toList(),
+          _enabledScripts
+              .map(
+                (config) => UserScript(
+                  source: UserScriptManager.generateInjectionCode(config),
+                  injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                  forMainFrameOnly: config.forMainFrameOnly,
+                ),
+              )
+              .toList(),
         ),
         initialUrlRequest: URLRequest(
-          url: url.startsWith('http') 
-            ? WebUri(url) 
-            : WebUri("http://localhost:$_actualPort/$url")
+          url: url.startsWith('http')
+              ? WebUri(url)
+              : WebUri("http://localhost:$_actualPort/$url"),
         ),
         initialSettings: InAppWebViewSettings(
           isInspectable: true,
-          transparentBackground: true,
           javaScriptEnabled: true,
-          allowFileAccessFromFileURLs: true, 
+          allowFileAccessFromFileURLs: true,
           allowUniversalAccessFromFileURLs: true,
-          isElementFullscreenEnabled: true, 
+          isElementFullscreenEnabled: true,
           allowsInlineMediaPlayback: true,
           allowsPictureInPictureMediaPlayback: true,
           builtInZoomControls: true,
-          displayZoomControls: false, 
+          displayZoomControls: false,
           iframeAllowFullscreen: true,
           mediaPlaybackRequiresUserGesture: false,
         ),
         onWebViewCreated: (controller) {
-          webViewController = controller;
-          _registerWebViewHandlers(controller);
+          _webViewBridge.registerHandlers(controller);
         },
         onConsoleMessage: (controller, consoleMessage) {
           debugPrint(
@@ -407,422 +639,43 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
     );
   }
 
-  void _registerWebViewHandlers(InAppWebViewController controller) {
-    controller.addJavaScriptHandler(
-      handlerName: 'zeeieGetUserScriptList',
-      callback: (args) async {
-        final scriptId = args.isNotEmpty ? args[0]?.toString() ?? '' : '';
-        if (scriptId.isEmpty) return <dynamic>[];
-        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_getUserScriptList')) return <dynamic>[];
-
-        final result = _allScripts.map((config) {
-          final lock = _isLockEffective(config);
-          final enabled = _isScriptEnabled(config);
-          return {
-            'scriptId': config.scriptId,
-            'namespace': config.namespace,
-            'name': config.name,
-            'author': config.author,
-            'version': config.version,
-            'enabled': enabled,
-            'lock': lock,
-            'type': config.sourceType,
-          };
-        }).toList();
-        return result;
-      },
-    );
-
-    controller.addJavaScriptHandler(
-      handlerName: 'zeeieSetUserScriptEnable',
-      callback: (args) async {
-        if (args.length < 3) return false;
-        final callerScriptId = args[0]?.toString() ?? '';
-        final targetScriptId = args[1]?.toString() ?? '';
-        final enabled = args[2] == true;
-        if (callerScriptId.isEmpty || targetScriptId.isEmpty) return false;
-        if (!UserScriptManager.scriptHasGrant(callerScriptId, 'Zeeie_setUserScriptEnable')) return false;
-
-        UserScriptConfig? config;
-        for (final s in _allScripts) {
-          if (s.scriptId == targetScriptId) {
-            config = s;
-            break;
-          }
-        }
-        if (config == null) return false;
-        if (_isLockEffective(config)) return false;
-
-        await UserScriptStorage.instance.setScriptEnabled(targetScriptId, enabled);
-        setState(() {
-          _rebuildEnabledScripts();
-        });
-        return true;
-      },
-    );
-
-    controller.addJavaScriptHandler(
-      handlerName: 'gmStorageSet',
-      callback: (args) async {
-        if (args.length < 3) return false;
-        final scriptId = args[0]?.toString() ?? '';
-        final key = args[1]?.toString() ?? '';
-        final encodedValue = args[2];
-        if (scriptId.isEmpty || key.isEmpty) return false;
-        if (!UserScriptManager.scriptHasGrant(scriptId, 'GM_setValue')) return false;
-        await UserScriptStorage.instance.setValue(scriptId, key, encodedValue);
-        return true;
-      },
-    );
-
-    controller.addJavaScriptHandler(
-      handlerName: 'gmStorageDelete',
-      callback: (args) async {
-        if (args.length < 2) return false;
-        final scriptId = args[0]?.toString() ?? '';
-        final key = args[1]?.toString() ?? '';
-        if (scriptId.isEmpty || key.isEmpty) return false;
-        if (!UserScriptManager.scriptHasGrant(scriptId, 'GM_deleteValue')) return false;
-        await UserScriptStorage.instance.deleteValue(scriptId, key);
-        return true;
-      },
-    );
-
-    controller.addJavaScriptHandler(
-      handlerName: 'zeeieToggleFullscreen',
-      callback: (args) async {
-        if (args.length < 2) return false;
-        final scriptId = args[0]?.toString() ?? '';
-        if (scriptId.isEmpty) return false;
-        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_toggleFullscreen')) return false;
-        final shouldFullscreen = args[1] == true;
-        await _handleToggleFullscreen(shouldFullscreen);
-        return true;
-      },
-    );
-
-    controller.addJavaScriptHandler(
-      handlerName: 'zeeieDownloadFile',
-      callback: (args) async {
-        debugPrint('[zeeieDownloadFile] handler called with ${args.length} args');
-        if (args.length < 2) {
-          throw ArgumentError('zeeieDownloadFile requires scriptId and request');
-        }
-        final scriptId = args[0]?.toString() ?? '';
-        final request = args[1];
-        debugPrint('[zeeieDownloadFile] scriptId=$scriptId requestType=${request.runtimeType}');
-        if (scriptId.isEmpty) {
-          throw ArgumentError('zeeieDownloadFile: scriptId is required');
-        }
-        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_downloadFile')) {
-          throw StateError('Zeeie_downloadFile grant not allowed');
-        }
-        if (request is! Map) {
-          throw ArgumentError('zeeieDownloadFile: request object is required');
-        }
-        final normalizedRequest = Map<String, dynamic>.from(
-          request.map((key, value) => MapEntry(key.toString(), value)),
-        );
-        return _handleDownloadFileRequest(controller, normalizedRequest);
-      },
-    );
-  }
-
   bool _isLockEffective(UserScriptConfig config) {
     return config.sourceType == 'system' && config.lock == true;
   }
 
   bool _isScriptEnabled(UserScriptConfig config) {
     if (_isLockEffective(config)) return true;
-    return UserScriptStorage.instance.getScriptEnabled(config.scriptId, defaultValue: true);
+    return UserScriptStorage.instance.getScriptEnabled(
+      config.scriptId,
+      defaultValue: true,
+    );
   }
 
   void _rebuildEnabledScripts() {
-    _enabledScripts = _allScripts.where((config) => _isScriptEnabled(config)).toList();
+    _enabledScripts = _allScripts
+        .where((config) => _isScriptEnabled(config))
+        .toList();
   }
 
-  Future<void> _handleToggleFullscreen(bool shouldFullscreen) async {
-    if (shouldFullscreen != _isFullscreen) {
-      if (shouldFullscreen) {
-        _wasMaximizedBeforeFullscreen = await windowManager.isMaximized();
-
-        if (_wasMaximizedBeforeFullscreen) {
-          await windowManager.unmaximize();
-          await Future.delayed(const Duration(milliseconds: 100));
-        }
-
-        _previousBounds = await windowManager.getBounds();
-
-        List<Display> displays = await screenRetriever.getAllDisplays();
-        Display targetDisplay = displays.first;
-        for (var display in displays) {
-          if (_previousBounds!.center.dx >= display.visiblePosition!.dx &&
-              _previousBounds!.center.dx <= display.visiblePosition!.dx + display.size.width) {
-            targetDisplay = display;
-            break;
-          }
-        }
-
-        await windowManager.setAsFrameless();
-        await windowManager.setAlwaysOnTop(true);
-
-        await windowManager.setBounds(Rect.fromLTWH(
-          targetDisplay.visiblePosition!.dx,
-          targetDisplay.visiblePosition!.dy,
-          targetDisplay.size.width,
-          targetDisplay.size.height,
-        ));
-
-        setState(() { _isFullscreen = true; });
-      } else {
-        await windowManager.setAlwaysOnTop(false);
-        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
-
-        if (_previousBounds != null) {
-          await windowManager.setBounds(_previousBounds!);
-        }
-        if (_wasMaximizedBeforeFullscreen) {
-          await windowManager.maximize();
-        } else {
-          if (_previousBounds != null) {
-            await windowManager.setBounds(_previousBounds!);
-          }
-        }
-
-        setState(() { _isFullscreen = false; });
-      }
-    }
+  void _handleScriptSettingsChanged() {
+    if (!mounted) return;
+    setState(() {
+      _rebuildEnabledScripts();
+      _webViewRevision++;
+    });
   }
 
-  Future<Map<String, dynamic>> _handleDownloadFileRequest(
-    InAppWebViewController controller,
-    Map<String, dynamic> request,
-  ) async {
-    final taskId = request['taskId']?.toString() ??
-        'download_${DateTime.now().millisecondsSinceEpoch}';
-    final url = request['url']?.toString() ?? '';
-    final rawFileName = request['fileName']?.toString() ?? 'download.bin';
-    final pageUrl = request['pageUrl']?.toString() ?? '';
-    debugPrint('[zeeieDownloadFile] request taskId=$taskId fileName=$rawFileName url=$url');
-
-    if (url.isEmpty) {
-      await _emitDownloadEvent(controller, {
-        'taskId': taskId,
-        'type': 'error',
-        'message': 'Download url is required',
-      });
-      throw ArgumentError('zeeieDownloadFile: url is required');
-    }
-
-    final headers = <String, String>{};
-    final rawHeaders = request['headers'];
-    if (rawHeaders is Map) {
-      rawHeaders.forEach((key, value) {
-        if (key == null || value == null) return;
-        headers[key.toString()] = value.toString();
-      });
-    }
-
-    final userAgent = request['userAgent']?.toString() ?? '';
-    if (!headers.containsKey('User-Agent') && userAgent.isNotEmpty) {
-      headers['User-Agent'] = userAgent;
-    }
-    if (!headers.containsKey('Referer') && pageUrl.isNotEmpty) {
-      headers['Referer'] = pageUrl;
-    }
-
-    if (!headers.containsKey('Cookie') && pageUrl.isNotEmpty) {
-      try {
-        final cookies = await CookieManager.instance().getCookies(
-          url: WebUri(pageUrl),
-        );
-        debugPrint('[zeeieDownloadFile] cookie count=${cookies.length} pageUrl=$pageUrl');
-        if (cookies.isNotEmpty) {
-          headers['Cookie'] = cookies
-              .map((cookie) => '${cookie.name}=${cookie.value}')
-              .join('; ');
-        }
-      } catch (e) {
-        debugPrint('Failed to get cookies for download: $e');
-      }
-    }
-
-    final downloadDirectory =
-        await getDownloadsDirectory() ??
-        await getApplicationDocumentsDirectory();
-    final filePath = await _buildUniqueFilePath(
-      downloadDirectory.path,
-      _sanitizeFileName(rawFileName),
-    );
-    debugPrint('[zeeieDownloadFile] save path=$filePath');
-
-    try {
-      await _downloadToFile(
-        controller: controller,
-        taskId: taskId,
-        url: url,
-        headers: headers,
-        filePath: filePath,
-      );
-    } catch (e) {
-      await _emitDownloadEvent(controller, {
-        'taskId': taskId,
-        'type': 'error',
-        'message': e.toString(),
-      });
-      rethrow;
-    }
-
-    final result = <String, dynamic>{
-      'taskId': taskId,
-      'type': 'complete',
-      'status': 200,
-      'url': url,
-      'filePath': filePath,
-      'fileName': p.basename(filePath),
-    };
-    debugPrint('[zeeieDownloadFile] completed taskId=$taskId filePath=$filePath');
-    await _emitDownloadEvent(controller, result);
-    return result;
-  }
-
-  Future<void> _downloadToFile({
-    required InAppWebViewController controller,
-    required String taskId,
-    required String url,
-    required Map<String, String> headers,
-    required String filePath,
-  }) async {
-    final uri = Uri.parse(url);
-    final client = HttpClient()..autoUncompress = false;
-    final file = File(filePath);
-    IOSink? sink;
-    debugPrint('[zeeieDownloadFile] starting http request taskId=$taskId url=$url');
-    final progressStopwatch = Stopwatch()..start();
-    int lastProgressEmitMs = 0;
-    int lastReportedPercent = -1;
-
-    try {
-      final request = await client.getUrl(uri);
-      headers.forEach((key, value) {
-        request.headers.set(key, value);
-      });
-
-      final response = await request.close();
-      debugPrint(
-        '[zeeieDownloadFile] response status=${response.statusCode} contentLength=${response.contentLength}',
-      );
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('HTTP ${response.statusCode}', uri: uri);
-      }
-
-      sink = file.openWrite();
-      final totalBytes = response.contentLength > 0 ? response.contentLength : 0;
-      int receivedBytes = 0;
-
-      await for (final chunk in response) {
-        sink.add(chunk);
-        receivedBytes += chunk.length;
-        final currentMs = progressStopwatch.elapsedMilliseconds;
-        final currentPercent = totalBytes > 0
-            ? ((receivedBytes / totalBytes) * 100).floor()
-            : -1;
-        final shouldEmit = totalBytes > 0
-            ? currentPercent != lastReportedPercent && currentMs - lastProgressEmitMs >= 120
-            : currentMs - lastProgressEmitMs >= 250;
-
-        if (shouldEmit) {
-          lastProgressEmitMs = currentMs;
-          lastReportedPercent = currentPercent;
-          await _emitDownloadEvent(controller, {
-            'taskId': taskId,
-            'type': 'progress',
-            'receivedBytes': receivedBytes,
-            'totalBytes': totalBytes,
-            'progress': totalBytes > 0 ? (receivedBytes / totalBytes) * 100 : null,
-          });
-        }
-      }
-
-      await _emitDownloadEvent(controller, {
-        'taskId': taskId,
-        'type': 'progress',
-        'receivedBytes': receivedBytes,
-        'totalBytes': totalBytes,
-        'progress': totalBytes > 0 ? 100 : null,
-      });
-
-      await sink.flush();
-      await sink.close();
-      debugPrint('[zeeieDownloadFile] file write finished taskId=$taskId');
-    } catch (e) {
-      debugPrint('[zeeieDownloadFile] download error taskId=$taskId error=$e');
-      if (sink != null) {
-        await sink.close();
-      }
-      if (await file.exists()) {
-        await file.delete();
-      }
-      rethrow;
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  Future<void> _emitDownloadEvent(
-    InAppWebViewController controller,
-    Map<String, dynamic> payload,
-  ) async {
-    debugPrint('[zeeieDownloadFile] emit event ${payload['type']} taskId=${payload['taskId']}');
-    final source = '''
-(() => {
-  if (typeof window.__ZEEIE_DOWNLOAD_EVENT__ === 'function') {
-    window.__ZEEIE_DOWNLOAD_EVENT__(${jsonEncode(payload)});
-  }
-})();
-''';
-    try {
-      await controller.evaluateJavascript(source: source);
-    } catch (e) {
-      debugPrint('Failed to emit download event: $e');
-    }
-  }
-
-  Future<String> _buildUniqueFilePath(
-    String directoryPath,
-    String fileName,
-  ) async {
-    final ext = p.extension(fileName);
-    final baseName = p.basenameWithoutExtension(fileName);
-    var candidate = fileName;
-    var index = 1;
-
-    while (await File(p.join(directoryPath, candidate)).exists()) {
-      candidate = '$baseName ($index)$ext';
-      index++;
-    }
-
-    return p.join(directoryPath, candidate);
-  }
-
-  String _sanitizeFileName(String fileName) {
-    final sanitized = fileName
-        .trim()
-        .replaceAll(RegExp(r'[\\/:*?"<>|]+'), '_')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-    if (sanitized.isEmpty) {
-      return 'download.bin';
-    }
-    return sanitized;
+  void _handleFullscreenChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   // 侧边栏菜单项封装
   Widget _buildMenuItem(SidebarItem item, int index) {
     return Slidable(
       // key 是必须的，用于标识列表中的项
-      key: ValueKey(item.hashCode), 
-      enabled: index != 0, 
+      key: ValueKey(item.hashCode),
+      enabled: index != 0,
 
       // 右侧滑出的面板（从右往左划）
       endActionPane: ActionPane(
@@ -835,11 +688,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
               _handleClose(index - 1);
             },
             backgroundColor: Colors.transparent,
-            child: const Icon(
-              Icons.close,
-              size: 20,
-              color: Colors.white70,
-            ),
+            child: const Icon(Icons.close, size: 20, color: Colors.white70),
           ),
         ],
       ),
@@ -859,9 +708,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
               width: double.infinity,
               decoration: _currentIndex == index
                   ? const BoxDecoration(
-                      border: Border(left: BorderSide(color: Colors.orangeAccent, width: 3)),
+                      border: Border(
+                        left: BorderSide(color: Colors.orangeAccent, width: 3),
+                      ),
                       gradient: LinearGradient(
-                        colors: [Color.fromRGBO(255, 255, 255, 0.1), Colors.transparent],
+                        colors: [
+                          Color.fromRGBO(255, 255, 255, 0.1),
+                          Colors.transparent,
+                        ],
                       ),
                     )
                   : null,
@@ -903,7 +757,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   Widget _buildIcon(dynamic iconSource) {
     const double iconSize = 40.0;
-    
+
     return SizedBox(
       width: iconSize,
       height: iconSize,
@@ -911,18 +765,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         child: () {
           if (iconSource is IconData) {
             return Icon(iconSource, size: iconSize, color: Colors.white);
-          } 
+          }
           if (iconSource is String) {
             if (iconSource.endsWith('.svg')) {
               return SvgPicture.asset(
                 iconSource,
                 width: iconSize,
                 height: iconSize,
-                placeholderBuilder: (context) => const CircularProgressIndicator(),
+                placeholderBuilder: (context) =>
+                    const CircularProgressIndicator(),
               );
             } else {
               return Image.asset(
-                iconSource, 
+                iconSource,
                 width: iconSize,
                 height: iconSize,
                 fit: BoxFit.contain,
@@ -937,7 +792,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   Widget _buildSidebarIcon(dynamic iconSource, bool isActive) {
     const double iconSize = 26.0;
-    
+
     // 1. 处理系统图标 IconData
     if (iconSource is IconData) {
       return Icon(
@@ -945,12 +800,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         size: iconSize,
         color: isActive ? Colors.white : Colors.white54,
       );
-    } 
-    
+    }
+
     // 2. 处理字符串路径 (PNG 或 SVG)
     if (iconSource is String) {
       Widget imageWidget;
-      
+
       if (iconSource.endsWith('.svg')) {
         // 如果是 SVG 路径
         imageWidget = SvgPicture.asset(
@@ -959,7 +814,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
           height: iconSize,
           fit: BoxFit.contain,
           // SVG 报错处理（可选）
-          placeholderBuilder: (context) => const Icon(Icons.broken_image, size: iconSize, color: Colors.white24),
+          placeholderBuilder: (context) => const Icon(
+            Icons.broken_image,
+            size: iconSize,
+            color: Colors.white24,
+          ),
         );
       } else {
         // 如果是普通的 PNG/JPG 路径
@@ -968,16 +827,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
           width: iconSize,
           height: iconSize,
           fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => 
-              const Icon(Icons.broken_image, size: iconSize, color: Colors.white24),
+          errorBuilder: (context, error, stackTrace) => const Icon(
+            Icons.broken_image,
+            size: iconSize,
+            color: Colors.white24,
+          ),
         );
       }
 
       // 统一应用透明度（未激活状态变淡）
-      return Opacity(
-        opacity: isActive ? 1.0 : 0.5, 
-        child: imageWidget,
-      );
+      return Opacity(opacity: isActive ? 1.0 : 0.5, child: imageWidget);
     }
 
     return const SizedBox(width: iconSize, height: iconSize);
@@ -985,34 +844,33 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   AppItem _buildAppItem(String name, dynamic icon, String url) {
     return AppItem(
-        name: name, 
-        icon: icon, // 你的图片路径
-        onTap: () {
-          bool isFinded = false;
-          for (var item in _sidebarItems) {
-            if (item.label == name) {
-              isFinded = true;
-              setState(() {
-                _currentIndex = _sidebarItems.indexOf(item) + 1; // 切换显示层级
-              });
-              break;
-            }
-          }
-          if (!isFinded) {
-            setState(() {
-              _sidebarItems.add(
-                SidebarItem(
-                  label: name, 
-                  url: url, 
-                  icon: icon,
-                )
-              );
-              _currentIndex = _sidebarItems.length; // 切换显示层级
-            });
-          }
-        }
-      );
+      name: name,
+      icon: icon, // 你的图片路径
+      onTap: () {
+        _openOrFocusApp(name, icon, url);
+      },
+    );
   }
+
+  void _openOrFocusApp(String name, dynamic icon, String url) {
+    bool isFinded = false;
+    for (var item in _sidebarItems) {
+      if (item.label == name) {
+        isFinded = true;
+        setState(() {
+          _currentIndex = _sidebarItems.indexOf(item) + 1;
+        });
+        break;
+      }
+    }
+    if (!isFinded) {
+      setState(() {
+        _sidebarItems.add(SidebarItem(label: name, url: url, icon: icon));
+        _currentIndex = _sidebarItems.length;
+      });
+    }
+  }
+
   void _handleClose(int indexInSidebar) {
     setState(() {
       int targetStackIndex = indexInSidebar + 1; // 在 Stack 中的实际索引
@@ -1029,7 +887,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
       _sidebarItems.removeAt(indexInSidebar);
     });
   }
-  
 }
 
 class StarFieldPainter extends CustomPainter {
@@ -1043,7 +900,8 @@ class StarFieldPainter extends CustomPainter {
     final paint = Paint()..color = Colors.white;
 
     for (var star in stars) {
-      double opacity = (math.sin(animation.value * 2 * math.pi * star.opacitySpeed) + 1) / 2; 
+      double opacity =
+          (math.sin(animation.value * 2 * math.pi * star.opacitySpeed) + 1) / 2;
       opacity = 0.1 + (opacity * 0.5);
       paint.color = Color.fromRGBO(255, 255, 255, opacity);
       canvas.drawCircle(Offset(star.x, star.y), star.size, paint);
@@ -1056,7 +914,12 @@ class StarFieldPainter extends CustomPainter {
 
 class Star {
   double x, y, size, opacitySpeed;
-  Star({required this.x, required this.y, required this.size, required this.opacitySpeed});
+  Star({
+    required this.x,
+    required this.y,
+    required this.size,
+    required this.opacitySpeed,
+  });
 }
 
 class AppItem {

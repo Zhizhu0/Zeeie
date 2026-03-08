@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站首页精细化屏蔽器 (含轮播图隐藏)
-// @version      2.6
-// @description  精准屏蔽B站首页的广告、推广、直播、番剧、轮播图等内容。点击齿轮图标设置，设置仅在首页显示。
-// @author       You
+// @version      2.7
+// @description  精准屏蔽B站首页的广告等内容。点击齿轮图标设置，设置仅在首页显示。
+// @author       Zeeie
 // @match        https://www.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_addStyle
@@ -22,6 +22,8 @@
         showPromo: true,      // 推广
         showLive: true,       // 直播
         showBangumi: true,    // 番剧
+        showManga: true,      // 漫画
+        showMatch: true,      // 赛事
         showGuochuang: true,  // 国创
         showVariety: true,    // 综艺
         showMovie: true,      // 电影
@@ -29,7 +31,7 @@
         showDoc: true,        // 纪录片
         showClass: true,      // 课堂
     };
-    let config = GM_getValue(CONFIG_KEY, defaultConfig);
+    let config = { ...defaultConfig, ...GM_getValue(CONFIG_KEY, {}) };
 
     // --- 2. 样式注入 ---
     const css = `
@@ -177,6 +179,8 @@
         }
         if (hrefs.includes('live.bilibili.com') || badgeText.includes('直播') || cardElement.querySelector('.bili-live-card')) return 'live';
         if (['番剧', '动画'].includes(badgeText)) return 'bangumi';
+        if (badgeText.includes('漫画') || hrefs.includes('manga.bilibili.com')) return 'manga';
+        if (badgeText.includes('赛事') || hrefs.includes('match.bilibili.com') || hrefs.includes('esports.bilibili.com') || hrefs.includes('/match/')) return 'match';
         if (['国创', '国产动画'].includes(badgeText)) return 'guochuang';
         if (['综艺'].includes(badgeText)) return 'variety';
         if (['电影'].includes(badgeText)) return 'movie';
@@ -212,6 +216,8 @@
                 case 'promo': shouldHide = !config.showPromo; break;
                 case 'live': shouldHide = !config.showLive; break;
                 case 'bangumi': shouldHide = !config.showBangumi; break;
+                case 'manga': shouldHide = !config.showManga; break;
+                case 'match': shouldHide = !config.showMatch; break;
                 case 'guochuang': shouldHide = !config.showGuochuang; break;
                 case 'variety': shouldHide = !config.showVariety; break;
                 case 'movie': shouldHide = !config.showMovie; break;
@@ -286,6 +292,8 @@
             { key: 'showPromo', label: '商业推广/商单' },
             { key: 'showLive', label: '直播内容' },
             { key: 'showBangumi', label: '番剧 (日漫)' },
+            { key: 'showManga', label: '漫画' },
+            { key: 'showMatch', label: '赛事' },
             { key: 'showGuochuang', label: '国创 (国产动画)' },
             { key: 'showVariety', label: '综艺' },
             { key: 'showMovie', label: '电影' },
@@ -320,7 +328,7 @@
 
         const footer = document.createElement('div');
         footer.className = 'bf-footer';
-        footer.innerText = 'v2.6 点击展开/收起';
+        footer.innerText = 'v2.7 点击展开/收起';
         menu.appendChild(footer);
 
         panel.appendChild(handle);

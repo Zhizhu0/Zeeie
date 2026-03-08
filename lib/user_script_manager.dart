@@ -38,7 +38,7 @@ class UserScriptConfig {
 }
 
 class UserScriptManager {
-  static Map<String, String> _shimCache = {};
+  static final Map<String, String> _shimCache = {};
   static final Map<String, Set<String>> _scriptGrants = {};
 
   static bool scriptHasGrant(String scriptId, String grant) {
@@ -75,6 +75,7 @@ class UserScriptManager {
     String jsContent, {
     String? scriptPath,
     String sourceType = 'system',
+    String? scriptIdOverride,
   }) {
     final lines = LineSplitter.split(jsContent);
     final matchPatterns = <String>[];
@@ -138,7 +139,10 @@ class UserScriptManager {
       }
     }
 
-    final scriptId = _buildScriptId(scriptName, scriptNamespace, scriptPath, jsContent);
+    final normalizedOverride = scriptIdOverride?.trim() ?? '';
+    final scriptId = normalizedOverride.isNotEmpty
+        ? normalizedOverride
+        : _buildScriptId(scriptName, scriptNamespace, scriptPath, jsContent);
     _scriptGrants[scriptId] = Set<String>.from(grants);
 
     return UserScriptConfig(
