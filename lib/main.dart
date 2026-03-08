@@ -1,4 +1,5 @@
-﻿import 'dart:math' as math;
+import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'dart:io';
@@ -7,6 +8,8 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'user_script_manager.dart';
 import 'user_script_storage.dart';
 import 'package:window_manager/window_manager.dart';
@@ -368,7 +371,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         initialUserScripts: UnmodifiableListView<UserScript>(
           _enabledScripts.map((config) => UserScript(
             source: UserScriptManager.generateInjectionCode(config),
-            injectionTime: config.runAt == "document-start" ? UserScriptInjectionTime.AT_DOCUMENT_START : UserScriptInjectionTime.AT_DOCUMENT_END,
+            injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            forMainFrameOnly: config.forMainFrameOnly,
           )).toList(),
         ),
         initialUrlRequest: URLRequest(
@@ -393,6 +397,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         onWebViewCreated: (controller) {
           webViewController = controller;
           _registerWebViewHandlers(controller);
+        },
+        onConsoleMessage: (controller, consoleMessage) {
+          debugPrint(
+            '[WebViewConsole] ${consoleMessage.messageLevel.toString()}: ${consoleMessage.message}',
+          );
         },
       ),
     );
@@ -491,6 +500,32 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         return true;
       },
     );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'zeeieDownloadFile',
+      callback: (args) async {
+        debugPrint('[zeeieDownloadFile] handler called with ${args.length} args');
+        if (args.length < 2) {
+          throw ArgumentError('zeeieDownloadFile requires scriptId and request');
+        }
+        final scriptId = args[0]?.toString() ?? '';
+        final request = args[1];
+        debugPrint('[zeeieDownloadFile] scriptId=$scriptId requestType=${request.runtimeType}');
+        if (scriptId.isEmpty) {
+          throw ArgumentError('zeeieDownloadFile: scriptId is required');
+        }
+        if (!UserScriptManager.scriptHasGrant(scriptId, 'Zeeie_downloadFile')) {
+          throw StateError('Zeeie_downloadFile grant not allowed');
+        }
+        if (request is! Map) {
+          throw ArgumentError('zeeieDownloadFile: request object is required');
+        }
+        final normalizedRequest = Map<String, dynamic>.from(
+          request.map((key, value) => MapEntry(key.toString(), value)),
+        );
+        return _handleDownloadFileRequest(controller, normalizedRequest);
+      },
+    );
   }
 
   bool _isLockEffective(UserScriptConfig config) {
@@ -557,6 +592,229 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         setState(() { _isFullscreen = false; });
       }
     }
+  }
+
+  Future<Map<String, dynamic>> _handleDownloadFileRequest(
+    InAppWebViewController controller,
+    Map<String, dynamic> request,
+  ) async {
+    final taskId = request['taskId']?.toString() ??
+        'download_${DateTime.now().millisecondsSinceEpoch}';
+    final url = request['url']?.toString() ?? '';
+    final rawFileName = request['fileName']?.toString() ?? 'download.bin';
+    final pageUrl = request['pageUrl']?.toString() ?? '';
+    debugPrint('[zeeieDownloadFile] request taskId=$taskId fileName=$rawFileName url=$url');
+
+    if (url.isEmpty) {
+      await _emitDownloadEvent(controller, {
+        'taskId': taskId,
+        'type': 'error',
+        'message': 'Download url is required',
+      });
+      throw ArgumentError('zeeieDownloadFile: url is required');
+    }
+
+    final headers = <String, String>{};
+    final rawHeaders = request['headers'];
+    if (rawHeaders is Map) {
+      rawHeaders.forEach((key, value) {
+        if (key == null || value == null) return;
+        headers[key.toString()] = value.toString();
+      });
+    }
+
+    final userAgent = request['userAgent']?.toString() ?? '';
+    if (!headers.containsKey('User-Agent') && userAgent.isNotEmpty) {
+      headers['User-Agent'] = userAgent;
+    }
+    if (!headers.containsKey('Referer') && pageUrl.isNotEmpty) {
+      headers['Referer'] = pageUrl;
+    }
+
+    if (!headers.containsKey('Cookie') && pageUrl.isNotEmpty) {
+      try {
+        final cookies = await CookieManager.instance().getCookies(
+          url: WebUri(pageUrl),
+        );
+        debugPrint('[zeeieDownloadFile] cookie count=${cookies.length} pageUrl=$pageUrl');
+        if (cookies.isNotEmpty) {
+          headers['Cookie'] = cookies
+              .map((cookie) => '${cookie.name}=${cookie.value}')
+              .join('; ');
+        }
+      } catch (e) {
+        debugPrint('Failed to get cookies for download: $e');
+      }
+    }
+
+    final downloadDirectory =
+        await getDownloadsDirectory() ??
+        await getApplicationDocumentsDirectory();
+    final filePath = await _buildUniqueFilePath(
+      downloadDirectory.path,
+      _sanitizeFileName(rawFileName),
+    );
+    debugPrint('[zeeieDownloadFile] save path=$filePath');
+
+    try {
+      await _downloadToFile(
+        controller: controller,
+        taskId: taskId,
+        url: url,
+        headers: headers,
+        filePath: filePath,
+      );
+    } catch (e) {
+      await _emitDownloadEvent(controller, {
+        'taskId': taskId,
+        'type': 'error',
+        'message': e.toString(),
+      });
+      rethrow;
+    }
+
+    final result = <String, dynamic>{
+      'taskId': taskId,
+      'type': 'complete',
+      'status': 200,
+      'url': url,
+      'filePath': filePath,
+      'fileName': p.basename(filePath),
+    };
+    debugPrint('[zeeieDownloadFile] completed taskId=$taskId filePath=$filePath');
+    await _emitDownloadEvent(controller, result);
+    return result;
+  }
+
+  Future<void> _downloadToFile({
+    required InAppWebViewController controller,
+    required String taskId,
+    required String url,
+    required Map<String, String> headers,
+    required String filePath,
+  }) async {
+    final uri = Uri.parse(url);
+    final client = HttpClient()..autoUncompress = false;
+    final file = File(filePath);
+    IOSink? sink;
+    debugPrint('[zeeieDownloadFile] starting http request taskId=$taskId url=$url');
+    final progressStopwatch = Stopwatch()..start();
+    int lastProgressEmitMs = 0;
+    int lastReportedPercent = -1;
+
+    try {
+      final request = await client.getUrl(uri);
+      headers.forEach((key, value) {
+        request.headers.set(key, value);
+      });
+
+      final response = await request.close();
+      debugPrint(
+        '[zeeieDownloadFile] response status=${response.statusCode} contentLength=${response.contentLength}',
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('HTTP ${response.statusCode}', uri: uri);
+      }
+
+      sink = file.openWrite();
+      final totalBytes = response.contentLength > 0 ? response.contentLength : 0;
+      int receivedBytes = 0;
+
+      await for (final chunk in response) {
+        sink.add(chunk);
+        receivedBytes += chunk.length;
+        final currentMs = progressStopwatch.elapsedMilliseconds;
+        final currentPercent = totalBytes > 0
+            ? ((receivedBytes / totalBytes) * 100).floor()
+            : -1;
+        final shouldEmit = totalBytes > 0
+            ? currentPercent != lastReportedPercent && currentMs - lastProgressEmitMs >= 120
+            : currentMs - lastProgressEmitMs >= 250;
+
+        if (shouldEmit) {
+          lastProgressEmitMs = currentMs;
+          lastReportedPercent = currentPercent;
+          await _emitDownloadEvent(controller, {
+            'taskId': taskId,
+            'type': 'progress',
+            'receivedBytes': receivedBytes,
+            'totalBytes': totalBytes,
+            'progress': totalBytes > 0 ? (receivedBytes / totalBytes) * 100 : null,
+          });
+        }
+      }
+
+      await _emitDownloadEvent(controller, {
+        'taskId': taskId,
+        'type': 'progress',
+        'receivedBytes': receivedBytes,
+        'totalBytes': totalBytes,
+        'progress': totalBytes > 0 ? 100 : null,
+      });
+
+      await sink.flush();
+      await sink.close();
+      debugPrint('[zeeieDownloadFile] file write finished taskId=$taskId');
+    } catch (e) {
+      debugPrint('[zeeieDownloadFile] download error taskId=$taskId error=$e');
+      if (sink != null) {
+        await sink.close();
+      }
+      if (await file.exists()) {
+        await file.delete();
+      }
+      rethrow;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _emitDownloadEvent(
+    InAppWebViewController controller,
+    Map<String, dynamic> payload,
+  ) async {
+    debugPrint('[zeeieDownloadFile] emit event ${payload['type']} taskId=${payload['taskId']}');
+    final source = '''
+(() => {
+  if (typeof window.__ZEEIE_DOWNLOAD_EVENT__ === 'function') {
+    window.__ZEEIE_DOWNLOAD_EVENT__(${jsonEncode(payload)});
+  }
+})();
+''';
+    try {
+      await controller.evaluateJavascript(source: source);
+    } catch (e) {
+      debugPrint('Failed to emit download event: $e');
+    }
+  }
+
+  Future<String> _buildUniqueFilePath(
+    String directoryPath,
+    String fileName,
+  ) async {
+    final ext = p.extension(fileName);
+    final baseName = p.basenameWithoutExtension(fileName);
+    var candidate = fileName;
+    var index = 1;
+
+    while (await File(p.join(directoryPath, candidate)).exists()) {
+      candidate = '$baseName ($index)$ext';
+      index++;
+    }
+
+    return p.join(directoryPath, candidate);
+  }
+
+  String _sanitizeFileName(String fileName) {
+    final sanitized = fileName
+        .trim()
+        .replaceAll(RegExp(r'[\\/:*?"<>|]+'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (sanitized.isEmpty) {
+      return 'download.bin';
+    }
+    return sanitized;
   }
 
   // 侧边栏菜单项封装

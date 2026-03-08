@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +10,7 @@ class UserScriptConfig {
   final List<String> matchPatterns;
   final Set<String> grants;
   final String runAt;
+  final bool forMainFrameOnly;
   final String scriptId;
   final String name;
   final String namespace;
@@ -24,6 +25,7 @@ class UserScriptConfig {
     required this.matchPatterns,
     required this.grants,
     required this.runAt, // document-start, document-end
+    required this.forMainFrameOnly,
     required this.scriptId,
     required this.name,
     required this.namespace,
@@ -78,6 +80,7 @@ class UserScriptManager {
     final matchPatterns = <String>[];
     final grants = <String>{};
     String runAt = 'document-end';
+    bool forMainFrameOnly = false;
     String scriptName = '';
     String scriptNamespace = ''; // 默认值
     String scriptAuthor = '';
@@ -111,6 +114,9 @@ class UserScriptManager {
           case "run-at":
             if (value.isNotEmpty) runAt = value;
             break;
+          case "noframes":
+            forMainFrameOnly = true;
+            break;
           case "name":
             if (scriptName.isEmpty && value.isNotEmpty) scriptName = value;
             break;
@@ -140,6 +146,7 @@ class UserScriptManager {
       matchPatterns: matchPatterns,
       grants: grants,
       runAt: runAt,
+      forMainFrameOnly: forMainFrameOnly,
       scriptId: scriptId,
       name: scriptName,
       namespace: scriptNamespace,
@@ -166,10 +173,24 @@ class UserScriptManager {
       }
     }
 
-    // 3. 注入原始代码
+    // 3. 统一在 document-start 注入，再由我们自己兜底 document-end。
+    // 某些平台的 document-end 依赖 DOMContentLoaded 事件，
+    // 如果监听注册时机晚于事件触发，脚本主体就不会真正执行。
+    buffer.write('const __GM_RUN_USER_SCRIPT__ = function() {');
     buffer.write('\n// --- User Script Start ---\n');
     buffer.write(config.scriptContent);
     buffer.write('\n// --- User Script End ---\n');
+    buffer.write('};');
+
+    buffer.write('if (${jsonEncode(config.runAt)} === "document-end") {');
+    buffer.write('if (document.readyState === "loading") {');
+    buffer.write('document.addEventListener("DOMContentLoaded", __GM_RUN_USER_SCRIPT__, { once: true });');
+    buffer.write('} else {');
+    buffer.write('__GM_RUN_USER_SCRIPT__();');
+    buffer.write('}');
+    buffer.write('} else {');
+    buffer.write('__GM_RUN_USER_SCRIPT__();');
+    buffer.write('}');
 
     buffer.write('})();'); // 结束 IIFE
 
