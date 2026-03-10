@@ -131,9 +131,7 @@ class UserScriptManager {
             if (scriptVersion.isEmpty && value.isNotEmpty) scriptVersion = value;
             break;
           case "lock":
-            if (value.isNotEmpty) {
-              scriptLock = value.toLowerCase() == 'true';
-            }
+            scriptLock = value.isEmpty || value.toLowerCase() == 'true';
             break;
         }
       }
@@ -171,6 +169,14 @@ class UserScriptManager {
     buffer.write('const __GM_SCRIPT_ID__ = ${jsonEncode(config.scriptId)};');
     buffer.write('const __GM_STORAGE__ = ${jsonEncode(UserScriptStorage.instance.getScriptData(config.scriptId))};');
 
+    // URL 匹配：若有 @match 且非 *://*/*，则仅在匹配的页面执行
+    final patterns = config.matchPatterns;
+    final hasRestrictiveMatch = patterns.isNotEmpty &&
+        !(patterns.length == 1 && patterns.single == '*://*/*');
+    if (hasRestrictiveMatch) {
+      buffer.write(_buildMatchCheckJs(patterns));
+    }
+
     for (var grant in config.grants) {
       if (_shimCache.containsKey(grant)) {
         buffer.write(_shimCache[grant]!);
@@ -199,6 +205,42 @@ class UserScriptManager {
     buffer.write('})();'); // 结束 IIFE
 
     return buffer.toString();
+  }
+
+  /// 生成 @match 模式的 URL 检查 JS 代码
+  static String _buildMatchCheckJs(List<String> patterns) {
+    final escaped = patterns.map((p) => jsonEncode(p)).join(',');
+    const dollar = r'$';
+    return '''
+const __GM_MATCH_PATTERNS__ = [$escaped];
+const __GM_MATCH__ = function(url) {
+  try {
+    var u = new URL(url);
+    var scheme = u.protocol.replace(/:$dollar/, '');
+    var host = u.hostname;
+    var path = u.pathname || '/';
+    if (path.indexOf('/') !== 0) path = '/' + path;
+    for (var i = 0; i < __GM_MATCH_PATTERNS__.length; i++) {
+      var pat = __GM_MATCH_PATTERNS__[i];
+      var m = pat.match(/^(\\*|https?|ftp|file):\\/\\/([^\\/]+)(\\/.*)?$dollar/);
+      if (!m) continue;
+      var pScheme = m[1], pHost = m[2], pPath = (m[3] || '/*');
+      if (pScheme !== '*' && pScheme !== scheme) continue;
+      if (pHost !== '*') {
+        if (pHost.indexOf('*.') === 0) {
+          var suffix = pHost.slice(1);
+          if (host !== suffix && host.slice(-suffix.length - 1) !== '.' + suffix) continue;
+        } else if (host !== pHost) continue;
+      }
+      var esc = function(s){ return s.replace(/[.*+?^$dollar()|[\\]\\\\}]/g, '\\\\' + '$dollar' + '&'); };
+      var pathRe = '^' + pPath.split('*').map(esc).join('.*') + '$dollar';
+      if (new RegExp(pathRe).test(path)) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+};
+if (!__GM_MATCH__(typeof location !== 'undefined' ? location.href : '')) return;
+''';
   }
 }
 

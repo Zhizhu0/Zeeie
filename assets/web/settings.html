@@ -64,6 +64,10 @@
         gap: 12px;
         align-items: center;
       }
+      .system-script-header,
+      .system-script-row {
+        grid-template-columns: 2.6fr 0.8fr 0.6fr;
+      }
       .script-header {
         font-size: 12px;
         color: var(--muted);
@@ -106,9 +110,40 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+        cursor: pointer;
+        user-select: none;
       }
       .subsection-title h3 {
         margin: 14px 0 10px;
+      }
+      .subsection-title .title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .subsection-title .collapse-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        color: var(--muted);
+        font-size: 14px;
+        transition: transform 0.25s ease;
+      }
+      .subsection-title.collapsed .collapse-toggle {
+        transform: rotate(-90deg);
+      }
+      .subsection-content {
+        display: grid;
+        grid-template-rows: 1fr;
+        transition: grid-template-rows 0.25s ease;
+      }
+      .subsection-content.collapsed {
+        grid-template-rows: 0fr;
+      }
+      .subsection-content-inner {
+        overflow: hidden;
       }
       .button {
         border: 1px solid rgba(34, 211, 238, 0.35);
@@ -264,32 +299,47 @@
         <h2>脚本管理</h2>
 
         <div class="subsection">
-          <h3>系统脚本</h3>
-          <div class="script-header">
-            <div>脚本</div>
-            <div>作者</div>
-            <div>版本</div>
-            <div>启用</div>
+          <div id="system-script-title" class="subsection-title">
+            <div class="title-row">
+              <h3>系统脚本</h3>
+              <span class="collapse-toggle">&gt;</span>
+            </div>
           </div>
-          <div id="system-script-list"></div>
-          <div id="system-empty" class="empty" hidden>无系统脚本</div>
+          <div id="system-script-content" class="subsection-content">
+            <div class="subsection-content-inner">
+            <div class="script-header system-script-header">
+              <div>脚本</div>
+              <div>版本</div>
+              <div>启用</div>
+            </div>
+            <div id="system-script-list"></div>
+            <div id="system-empty" class="empty" hidden>无系统脚本</div>
+            </div>
+          </div>
         </div>
 
         <div class="subsection">
-          <div class="subsection-title">
-            <h3>用户脚本</h3>
+          <div id="user-script-title" class="subsection-title">
+            <div class="title-row">
+              <h3>用户脚本</h3>
+              <span class="collapse-toggle">&gt;</span>
+            </div>
             <button id="add-user-script" type="button" class="button">新增用户脚本</button>
           </div>
-          <div class="script-header user-script-header">
-            <div>脚本</div>
-            <div>作者</div>
-            <div>版本</div>
-            <div>启用</div>
-            <div>操作</div>
+          <div id="user-script-content" class="subsection-content">
+            <div class="subsection-content-inner">
+            <div class="script-header user-script-header">
+              <div>脚本</div>
+              <div>作者</div>
+              <div>版本</div>
+              <div>启用</div>
+              <div>操作</div>
+            </div>
+            <div id="user-script-list"></div>
+            <div class="hint">在脚本头中填写 `@name`、`@namespace`、`@version` 等信息后，列表会自动显示对应元数据。</div>
+            <div id="user-empty" class="empty">无用户脚本</div>
+            </div>
           </div>
-          <div id="user-script-list"></div>
-          <div class="hint">在脚本头中填写 `@name`、`@namespace`、`@version` 等信息后，列表会自动显示对应元数据。</div>
-          <div id="user-empty" class="empty">无用户脚本</div>
         </div>
       </div>
     </div>

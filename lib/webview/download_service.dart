@@ -7,6 +7,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../ffmpeg_helper.dart';
 import '../user_script_storage.dart';
 
 class DownloadToastMessage {
@@ -22,11 +23,14 @@ class DownloadToastMessage {
 }
 
 class DownloadService extends ChangeNotifier {
+  DownloadService({FFmpegHelper? ffmpegHelper}) : _ffmpegHelper = ffmpegHelper;
+
   static const String managerScriptId = 'Zeeie::Zeeie Download Manager';
   static const String recordsStorageKey = 'downloadRecords';
   static const Duration _activeOverlayDuration = Duration(seconds: 5);
   static const Duration _existsCacheTtl = Duration(seconds: 3);
 
+  final FFmpegHelper? _ffmpegHelper;
   final List<Map<String, dynamic>> _records = [];
   final Map<String, _ActiveDownloadTask> _activeTasks = {};
 
@@ -111,10 +115,12 @@ class DownloadService extends ChangeNotifier {
         request['taskId']?.toString() ??
         'download_${DateTime.now().millisecondsSinceEpoch}';
     final url = request['url']?.toString() ?? '';
+    final audioUrl = request['audioUrl']?.toString() ?? '';
+    final merge = request['merge'] == true;
     final rawFileName = request['fileName']?.toString() ?? 'download.bin';
     final pageUrl = request['pageUrl']?.toString() ?? '';
     debugPrint(
-      '[zeeieDownloadFile] request taskId=$taskId fileName=$rawFileName url=$url',
+      '[zeeieDownloadFile] request taskId=$taskId fileName=$rawFileName url=$url audioUrl=$audioUrl merge=$merge',
     );
 
     if (url.isEmpty) {
@@ -195,13 +201,84 @@ class DownloadService extends ChangeNotifier {
     _activeTasks[taskId] = activeTask;
 
     try {
-      await _downloadToFile(
-        controller: controller,
-        activeTask: activeTask,
-        url: url,
-        headers: headers,
-        filePath: filePath,
-      );
+      if (merge && audioUrl.isNotEmpty) {
+        // Download video
+        final videoTempPath = '$filePath.video.temp';
+        await _downloadToFile(
+          controller: controller,
+          activeTask: activeTask,
+          url: url,
+          headers: headers,
+          filePath: videoTempPath,
+          isMergePart: true,
+          partName: 'video',
+        );
+
+        // Download audio
+        final audioTempPath = '$filePath.audio.temp';
+        await _downloadToFile(
+          controller: controller,
+          activeTask: activeTask,
+          url: audioUrl,
+          headers: headers,
+          filePath: audioTempPath,
+          isMergePart: true,
+          partName: 'audio',
+        );
+
+        // Merge them using ffmpeg (PATH or auto-downloaded)
+        _upsertRecord({
+          ...?_findRecord(taskId),
+          'message': '正在合并音视频...',
+        });
+
+        final ffmpegPath = _ffmpegHelper != null
+            ? await _ffmpegHelper!.getFFmpegPath()
+            : await _findFfmpegInPath();
+
+        if (ffmpegPath == null || ffmpegPath.isEmpty) {
+          final videoFile = File(videoTempPath);
+          if (await videoFile.exists()) await videoFile.delete();
+          final audioFile = File(audioTempPath);
+          if (await audioFile.exists()) await audioFile.delete();
+          throw Exception(
+            '未找到 FFmpeg。请安装 FFmpeg 并加入系统 PATH，或在弹窗中选择自动下载。',
+          );
+        }
+
+        final mergeResult = await Process.run(
+          ffmpegPath,
+          [
+            '-y',
+            '-i', videoTempPath,
+            '-i', audioTempPath,
+            '-c:v', 'copy',
+            '-c:a', 'copy',
+            filePath,
+          ],
+          runInShell: false,
+        );
+
+        // Clean up temp files
+        final videoFile = File(videoTempPath);
+        if (await videoFile.exists()) await videoFile.delete();
+        final audioFile = File(audioTempPath);
+        if (await audioFile.exists()) await audioFile.delete();
+
+        if (mergeResult.exitCode != 0) {
+          debugPrint('FFmpeg merge failed: ${mergeResult.stderr}');
+          throw Exception('合并音视频失败: ${mergeResult.stderr}');
+        }
+      } else {
+        await _downloadToFile(
+          controller: controller,
+          activeTask: activeTask,
+          url: url,
+          headers: headers,
+          filePath: filePath,
+          isMergePart: false,
+        );
+      }
     } on _DownloadCancelledException catch (_) {
       _removeRecord(taskId, persist: true);
       _showToast(
@@ -244,8 +321,6 @@ class DownloadService extends ChangeNotifier {
       'type': 'complete',
       'status': 200,
       'url': url,
-      'filePath': filePath,
-      'fileName': p.basename(filePath),
     };
     debugPrint(
       '[zeeieDownloadFile] completed taskId=$taskId filePath=$filePath',
@@ -298,6 +373,27 @@ class DownloadService extends ChangeNotifier {
     return true;
   }
 
+  Future<String?> _findFfmpegInPath() async {
+    try {
+      final result = await Process.run(
+        Platform.isWindows ? 'where' : 'which',
+        Platform.isWindows ? ['ffmpeg'] : ['ffmpeg'],
+        runInShell: true,
+      );
+      if (result.exitCode == 0 &&
+          result.stdout.toString().trim().isNotEmpty) {
+        final lines =
+            result.stdout.toString().trim().split(RegExp(r'\s*\r?\n\s*'));
+        final first =
+            lines.firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
+        if (first.isNotEmpty) return first.trim();
+      }
+    } catch (e) {
+      debugPrint('[DownloadService] PATH ffmpeg check: $e');
+    }
+    return null;
+  }
+
   Future<bool> revealInFolder(String taskId) async {
     await init();
     final record = _findRecord(taskId);
@@ -312,17 +408,17 @@ class DownloadService extends ChangeNotifier {
 
     try {
       if (Platform.isWindows) {
+        // 使用 runInShell 并手动拼接带引号的路径，避免路径含空格时被拆开导致打开到错误位置
+        final pathForShell = normalizedPath.replaceAll('"', r'""');
         if (await file.exists()) {
-          final selectArg = '/select,"$normalizedPath"';
-          unawaited(
-            Process.start('explorer.exe', [selectArg], runInShell: true),
-          );
+          final cmd = 'explorer.exe /select,"$pathForShell"';
+          unawaited(Process.run(cmd, [], runInShell: false));
           return true;
         }
         if (await directory.exists()) {
-          unawaited(
-            Process.start('explorer.exe', [directoryPath], runInShell: true),
-          );
+          final dirPathForShell = directoryPath.replaceAll('"', r'""');
+          final cmd = 'explorer.exe "$dirPathForShell"';
+          unawaited(Process.run(cmd, [], runInShell: false));
           return true;
         }
         return false;
@@ -356,6 +452,8 @@ class DownloadService extends ChangeNotifier {
     required String url,
     required Map<String, String> headers,
     required String filePath,
+    bool isMergePart = false,
+    String partName = '',
   }) async {
     final uri = Uri.parse(url);
     final client = HttpClient()..autoUncompress = false;
@@ -425,6 +523,7 @@ class DownloadService extends ChangeNotifier {
             'progress': totalBytes > 0
                 ? (receivedBytes / totalBytes) * 100
                 : null,
+            'partName': partName,
           });
         }
       }
@@ -435,6 +534,7 @@ class DownloadService extends ChangeNotifier {
         'receivedBytes': receivedBytes,
         'totalBytes': totalBytes,
         'progress': totalBytes > 0 ? 100 : null,
+        'partName': partName,
       });
 
       _upsertRecord({

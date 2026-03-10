@@ -1,10 +1,9 @@
 // ==UserScript==
 // @name         Zeeie Download Manager
-// @namespace    Zeeie
 // @version      1.0
 // @author       Zeeie
 // @description  Download management system page.
-// @match        *://*/*
+// @match        *://localhost/assets/web/downloads.html
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        Zeeie_getDownloadSnapshot
@@ -12,7 +11,7 @@
 // @grant        Zeeie_deleteDownloadRecord
 // @grant        Zeeie_revealDownloadInFolder
 // @run-at       document-start
-// @lock         true
+// @lock
 // ==/UserScript==
 
 (function() {

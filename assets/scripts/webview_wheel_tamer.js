@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Zeeie WebView Wheel Tamer
-// @namespace    https://zeeie.local/
 // @version      1.0.0
 // @description  Normalize wheel scrolling inside the Windows WebView host.
 // @author       Zeeie
-// @match        *://*/*
+// @match        https://www.bilibili.com/*
+// @match        https://www.pixiv.net/*
 // @run-at       document-start
 // ==/UserScript==
 

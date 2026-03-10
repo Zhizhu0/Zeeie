@@ -1,16 +1,15 @@
 // ==UserScript==
 // @name         Zeeie Settings Manager
-// @namespace    Zeeie
 // @version      1.0
 // @author       Zeeie
 // @description  Settings page script manager UI.
-// @match        *://*/*
+// @match        *://localhost/assets/web/settings.html
 // @grant        Zeeie_getUserScriptList
 // @grant        Zeeie_getUserScriptContent
 // @grant        Zeeie_saveUserScript
 // @grant        Zeeie_setUserScriptEnable
 // @run-at       document-start
-// @lock         true
+// @lock
 // ==/UserScript==
 
 (function() {
@@ -29,10 +28,42 @@
     return el;
   }
 
+  var STORAGE_KEY_SYSTEM = 'zeeie_settings_systemScriptCollapsed';
+  var STORAGE_KEY_USER = 'zeeie_settings_userScriptCollapsed';
+
   var state = {
     editingScriptId: '',
-    saving: false
+    saving: false,
+    systemScriptCollapsed: false,
+    userScriptCollapsed: false
   };
+
+  function loadCollapseState() {
+    try {
+      var sys = localStorage.getItem(STORAGE_KEY_SYSTEM);
+      var usr = localStorage.getItem(STORAGE_KEY_USER);
+      state.systemScriptCollapsed = sys === '1';
+      state.userScriptCollapsed = usr === '1';
+    } catch (e) {}
+  }
+
+  function saveCollapseState() {
+    try {
+      localStorage.setItem(STORAGE_KEY_SYSTEM, state.systemScriptCollapsed ? '1' : '0');
+      localStorage.setItem(STORAGE_KEY_USER, state.userScriptCollapsed ? '1' : '0');
+    } catch (e) {}
+  }
+
+  function applyCollapseState() {
+    var sysTitle = $('system-script-title');
+    var sysContent = $('system-script-content');
+    var usrTitle = $('user-script-title');
+    var usrContent = $('user-script-content');
+    if (sysTitle) sysTitle.classList.toggle('collapsed', state.systemScriptCollapsed);
+    if (sysContent) sysContent.classList.toggle('collapsed', state.systemScriptCollapsed);
+    if (usrTitle) usrTitle.classList.toggle('collapsed', state.userScriptCollapsed);
+    if (usrContent) usrContent.classList.toggle('collapsed', state.userScriptCollapsed);
+  }
 
   function setEmptyState(listEl, emptyEl, count) {
     if (!listEl || !emptyEl) return;
@@ -95,7 +126,8 @@
     options = options || {};
     listEl.innerHTML = '';
     list.forEach(function(item) {
-      var rowClassName = options.userList ? 'script-row user-script-row' : 'script-row';
+      var isUserList = options.userList === true;
+      var rowClassName = isUserList ? 'script-row user-script-row' : 'script-row system-script-row';
       var row = createEl('div', rowClassName);
 
       var nameCell = createEl('div', 'script-name');
@@ -105,7 +137,6 @@
       nameCell.appendChild(primary);
       nameCell.appendChild(secondary);
 
-      var authorCell = createEl('div', '', item.author || '-');
       var versionCell = createEl('div', '', item.version || '-');
 
       var switchWrap = createEl('label', 'switch');
@@ -140,7 +171,10 @@
       });
 
       row.appendChild(nameCell);
-      row.appendChild(authorCell);
+      if (isUserList) {
+        var authorCell = createEl('div', '', item.author || '-');
+        row.appendChild(authorCell);
+      }
       row.appendChild(versionCell);
       row.appendChild(switchWrap);
 
@@ -198,6 +232,29 @@
       });
   }
 
+  function bindCollapseEvents() {
+    var sysTitle = $('system-script-title');
+    var usrTitle = $('user-script-title');
+    var addButton = $('add-user-script');
+
+    if (sysTitle) {
+      sysTitle.addEventListener('click', function() {
+        state.systemScriptCollapsed = !state.systemScriptCollapsed;
+        applyCollapseState();
+        saveCollapseState();
+      });
+    }
+
+    if (usrTitle) {
+      usrTitle.addEventListener('click', function(event) {
+        if (addButton && (event.target === addButton || addButton.contains(event.target))) return;
+        state.userScriptCollapsed = !state.userScriptCollapsed;
+        applyCollapseState();
+        saveCollapseState();
+      });
+    }
+  }
+
   function bindEvents() {
     var addButton = $('add-user-script');
     var saveButton = $('save-user-script');
@@ -207,7 +264,8 @@
     var editor = $('script-content');
 
     if (addButton) {
-      addButton.addEventListener('click', function() {
+      addButton.addEventListener('click', function(event) {
+        event.stopPropagation();
         openEditorModal('', '');
       });
     }
@@ -269,6 +327,9 @@
   }
 
   function init() {
+    loadCollapseState();
+    applyCollapseState();
+    bindCollapseEvents();
     bindEvents();
     loadLists();
   }

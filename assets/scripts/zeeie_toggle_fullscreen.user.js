@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Zeeie Fullscreen Watcher
-// @namespace    Zeeie
 // @version      1.0
 // @description  Notify host app when fullscreen changes.
-// @match        *://*/*
+// @author       Zeeie
+// @match        https://www.bilibili.com/*
+// @match        https://www.pixiv.net/*
 // @grant        Zeeie_toggleFullscreen
 // @run-at       document-start
 // ==/UserScript==

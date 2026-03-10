@@ -47,7 +47,8 @@ if (typeof window !== 'undefined' && typeof window.__ZEEIE_DOWNLOAD_BRIDGE_INIT_
                     lengthComputable: typeof event.totalBytes === 'number' && event.totalBytes > 0,
                     loaded: typeof event.receivedBytes === 'number' ? event.receivedBytes : 0,
                     total: typeof event.totalBytes === 'number' ? event.totalBytes : 0,
-                    percent: typeof event.progress === 'number' ? event.progress : null
+                    percent: typeof event.progress === 'number' ? event.progress : null,
+                    partName: event.partName
                 });
             }
             return;
@@ -108,6 +109,8 @@ if (typeof window !== 'undefined' && typeof window.__ZEEIE_DOWNLOAD_BRIDGE_INIT_
                 flutter_inappwebview.callHandler('zeeieDownloadFile', payload.scriptId || '', {
                     taskId: taskId,
                     url: payload.url,
+                    audioUrl: payload.audioUrl || '',
+                    merge: payload.merge || false,
                     fileName: payload.fileName,
                     headers: payload.headers && typeof payload.headers === 'object' ? payload.headers : {},
                     pageUrl: payload.pageUrl || '',
@@ -192,6 +195,8 @@ const Zeeie_downloadFile = function(details) {
                         taskId: taskId,
                         scriptId: scriptId,
                         url: details.url,
+                        audioUrl: details.audioUrl || '',
+                        merge: details.merge || false,
                         fileName: fileName,
                         headers: details.headers && typeof details.headers === 'object' ? details.headers : {},
                         pageUrl: typeof location !== 'undefined' ? location.href : '',
@@ -208,6 +213,8 @@ const Zeeie_downloadFile = function(details) {
                 flutter_inappwebview.callHandler('zeeieDownloadFile', scriptId, {
                     taskId: taskId,
                     url: details.url,
+                    audioUrl: details.audioUrl || '',
+                    merge: details.merge || false,
                     fileName: fileName,
                     headers: details.headers && typeof details.headers === 'object' ? details.headers : {},
                     pageUrl: typeof location !== 'undefined' ? location.href : '',

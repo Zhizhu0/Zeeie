@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Bilibili 视频/音频下载器 (支持Hi-Res无损/杜比)
-// @namespace    http://tampermonkey.net/
-// @version      7.1
+// @version      7.2
 // @description  支持后台下载状态恢复。关闭菜单后再次点击，直接显示正在进行的任务进度。自动检测并下载Hi-Res无损音频或杜比全景声。
-// @author       Gemini
-// @match        https://www.bilibili.com/video/*
+// @author       Zeeie
+// @match        https://www.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @connect      *
 // @grant        unsafeWindow
 // @grant        Zeeie_downloadFile
+// @grant        Zeeie_getDownloadSnapshot
 // ==/UserScript==
 
 (function() {
@@ -110,14 +110,45 @@
     document.head.appendChild(style);
 
     // ================= 初始化 =================
+    const VIDEO_PATH_PREFIX = '/video/';
+    function isVideoPage() {
+        return typeof location !== 'undefined' && location.pathname.startsWith(VIDEO_PATH_PREFIX);
+    }
+
     function init() {
+        if (!isVideoPage()) return;
         setInterval(() => checkAndInject(), 1500);
+        checkAndInject();
+    }
+
+    function startWhenVideoPage() {
+        if (isVideoPage()) {
+            init();
+            return;
+        }
+        log('not video page yet, watching URL');
+        const t = setInterval(() => {
+            if (!isVideoPage()) return;
+            clearInterval(t);
+            log('video page detected, init');
+            init();
+        }, 500);
     }
 
     function checkAndInject() {
+        if (!isVideoPage()) return;
         const toolbar = document.querySelector('.video-toolbar-right') ||
             document.querySelector('.video-toolbar .right') ||
-            document.querySelector('#arc_toolbar_report');
+            document.querySelector('#arc_toolbar_report') ||
+            document.querySelector('.toolbar-right') ||
+            document.querySelector('.video-info-container .toolbar') ||
+            document.querySelector('[class*="toolbar"][class*="right"]') ||
+            document.querySelector('.video-toolbar') ||
+            document.querySelector('.action-bar') ||
+            document.querySelector('.video-page__toolbar') ||
+            document.querySelector('.video-info-detail') ||
+            document.querySelector('.video-info-container') ||
+            document.querySelector('#viewbox_report');
         if (!toolbar) return;
         if (document.getElementById(BTN_ID)) return;
         createUI(toolbar);
@@ -252,132 +283,255 @@
         header.innerText = '选择下载内容';
         menu.appendChild(header);
 
-        // ------- 音频解析逻辑 -------
-        let bestAudioUrl = null;
-        let audioTypeTag = '';
-        let audioExt = '.m4a';
-        let audioLabelColor = 'gm-tag-audio';
+        const form = document.createElement('div');
+        form.style.padding = '10px 15px';
 
-        // 1. 优先检查 FLAC (Hi-Res 无损)
-        if (dashData.dash.flac && dashData.dash.flac.audio) {
-            bestAudioUrl = dashData.dash.flac.audio.baseUrl;
-            audioTypeTag = 'Hi-Res 无损';
-            audioExt = '.flac';
-            audioLabelColor = 'gm-tag-hires';
+        // Collect videos
+        const videos = [];
+        if (legacyData && legacyData.durl && legacyData.durl.length === 1) {
+            videos.push({
+                type: 'legacy',
+                id: legacyData.quality,
+                name: qualityMap[legacyData.quality] || `${legacyData.quality}P`,
+                url: legacyData.durl[0].url,
+                label: '直链 MP4'
+            });
         }
-        // 2. 其次检查 Dolby (杜比全景声)
-        else if (dashData.dash.dolby && dashData.dash.dolby.audio && dashData.dash.dolby.audio.length > 0) {
-            bestAudioUrl = dashData.dash.dolby.audio[0].baseUrl; // 通常杜比也是 m4a/ec3
-            audioTypeTag = '杜比全景声';
-            audioLabelColor = 'gm-tag-dolby';
-        }
-        // 3. 最后使用标准音频 (Standard High Quality)
-        else if (dashData.dash.audio && dashData.dash.audio.length > 0) {
-            bestAudioUrl = dashData.dash.audio[0].baseUrl;
-            audioTypeTag = 'High Quality';
-        }
-        // ---------------------------
-
-        const legacyMap = {};
-        if (legacyData && legacyData.durl && legacyData.durl.length === 1) legacyMap[legacyData.quality] = legacyData.durl[0].url;
-
-        const seen = new Set();
-        if (dashData.dash.video) {
+        const seenVideos = new Set();
+        if (dashData && dashData.dash && dashData.dash.video) {
             dashData.dash.video.forEach(v => {
-                if (seen.has(v.id)) return;
-                seen.add(v.id);
-                const qName = qualityMap[v.id] || `${v.id}P`;
-                const item = document.createElement('div');
-                item.className = 'gm-q-item';
-
-                if (legacyMap[v.id]) {
-                    item.innerHTML = `<span>${qName} <span class="gm-q-tag gm-tag-mp4">直链 MP4</span></span>`;
-                    item.onclick = (e) => { e.stopPropagation(); downloadDirect(legacyMap[v.id], `${getTitle()}_${qName}.mp4`, menu); };
-                } else {
-                    item.innerHTML = `<span>${qName} <span class="gm-q-tag gm-tag-dash">分离下载</span></span>`;
-                    // 传递解析出的最佳音频
-                    item.onclick = (e) => {
-                        e.stopPropagation();
-                        // 如果音频是 FLAC，合并后的容器可能需要注意，但 PotPlayer 通常能放
-                        // 为了兼容性，这里文件名后缀不改，但内部逻辑会下载对应流
-                        downloadSeparate(v.baseUrl, bestAudioUrl, getTitle(), qName, menu, audioExt);
-                    };
-                }
-                menu.appendChild(item);
+                if (seenVideos.has(v.id)) return;
+                seenVideos.add(v.id);
+                videos.push({
+                    type: 'dash',
+                    id: v.id,
+                    name: qualityMap[v.id] || `${v.id}P`,
+                    url: v.baseUrl,
+                    label: '分离视频'
+                });
             });
         }
 
-        if (bestAudioUrl) {
-            const separator = document.createElement('div');
-            separator.style.borderTop = '1px solid #eee';
-            separator.style.margin = '4px 0';
-            menu.appendChild(separator);
-            const audioItem = document.createElement('div');
-            audioItem.className = 'gm-q-item';
-            audioItem.innerHTML = `<span>🎵 仅下载音频 <span class="gm-q-tag ${audioLabelColor}">${audioTypeTag}</span></span>`;
-            audioItem.onclick = (e) => {
-                e.stopPropagation();
-                downloadAudioOnly(bestAudioUrl, `${getTitle()}_${audioTypeTag}${audioExt}`, menu);
-            };
-            menu.appendChild(audioItem);
+        // Collect audios
+        const audios = [];
+        if (dashData && dashData.dash) {
+            if (dashData.dash.flac && dashData.dash.flac.audio) {
+                audios.push({
+                    id: 'flac',
+                    name: 'Hi-Res 无损',
+                    url: dashData.dash.flac.audio.baseUrl,
+                    ext: '.flac',
+                    color: 'gm-tag-hires'
+                });
+            }
+            if (dashData.dash.dolby && dashData.dash.dolby.audio && dashData.dash.dolby.audio.length > 0) {
+                audios.push({
+                    id: 'dolby',
+                    name: '杜比全景声',
+                    url: dashData.dash.dolby.audio[0].baseUrl,
+                    ext: '.m4a',
+                    color: 'gm-tag-dolby'
+                });
+            }
+            if (dashData.dash.audio && dashData.dash.audio.length > 0) {
+                audios.push({
+                    id: 'standard',
+                    name: 'High Quality',
+                    url: dashData.dash.audio[0].baseUrl,
+                    ext: '.m4a',
+                    color: 'gm-tag-audio'
+                });
+            }
         }
+
+        // Video Section
+        const videoTitle = document.createElement('div');
+        videoTitle.style.fontWeight = 'bold';
+        videoTitle.style.marginBottom = '5px';
+        videoTitle.innerText = '🎬 视频选项 (单选)';
+        form.appendChild(videoTitle);
+
+        const videoContainer = document.createElement('div');
+        videoContainer.style.marginBottom = '15px';
+        videos.forEach((v, idx) => {
+            const label = document.createElement('label');
+            label.style.display = 'block';
+            label.style.marginBottom = '5px';
+            label.style.cursor = 'pointer';
+            label.innerHTML = `<input type="radio" name="gm-video" value="${idx}" ${idx === 0 ? 'checked' : ''}> ${v.name} <span class="gm-q-tag ${v.type === 'legacy' ? 'gm-tag-mp4' : 'gm-tag-dash'}">${v.label}</span>`;
+            videoContainer.appendChild(label);
+        });
+        const noVideoLabel = document.createElement('label');
+        noVideoLabel.style.display = 'block';
+        noVideoLabel.style.marginBottom = '5px';
+        noVideoLabel.style.cursor = 'pointer';
+        noVideoLabel.innerHTML = `<input type="radio" name="gm-video" value="-1" ${videos.length === 0 ? 'checked' : ''}> 不下载视频`;
+        videoContainer.appendChild(noVideoLabel);
+        form.appendChild(videoContainer);
+
+        // Audio Section
+        const audioTitle = document.createElement('div');
+        audioTitle.style.fontWeight = 'bold';
+        audioTitle.style.marginBottom = '5px';
+        audioTitle.innerText = '🎵 音频选项 (单选)';
+        form.appendChild(audioTitle);
+
+        const audioContainer = document.createElement('div');
+        audioContainer.style.marginBottom = '15px';
+        audios.forEach((a, idx) => {
+            const label = document.createElement('label');
+            label.style.display = 'block';
+            label.style.marginBottom = '5px';
+            label.style.cursor = 'pointer';
+            label.innerHTML = `<input type="radio" name="gm-audio" value="${idx}" ${idx === 0 ? 'checked' : ''}> ${a.name} <span class="gm-q-tag ${a.color}">${a.name}</span>`;
+            audioContainer.appendChild(label);
+        });
+        const noAudioLabel = document.createElement('label');
+        noAudioLabel.style.display = 'block';
+        noAudioLabel.style.marginBottom = '5px';
+        noAudioLabel.style.cursor = 'pointer';
+        noAudioLabel.innerHTML = `<input type="radio" name="gm-audio" value="-1" ${audios.length === 0 ? 'checked' : ''}> 不下载音频`;
+        audioContainer.appendChild(noAudioLabel);
+        form.appendChild(audioContainer);
+
+        // Merge Checkbox (default checked when enabled)
+        const mergeLabel = document.createElement('label');
+        mergeLabel.style.display = 'block';
+        mergeLabel.style.marginBottom = '15px';
+        mergeLabel.style.fontWeight = 'bold';
+        mergeLabel.style.cursor = 'pointer';
+        mergeLabel.innerHTML = `<input type="checkbox" id="gm-merge-checkbox" disabled checked> 🔄 合并音视频 (需同时选择分离视频和音频)`;
+        form.appendChild(mergeLabel);
+
+        // Download Button
+        const submitBtn = document.createElement('button');
+        submitBtn.innerText = '开始下载';
+        submitBtn.style.width = '100%';
+        submitBtn.style.padding = '8px';
+        submitBtn.style.backgroundColor = '#00AEEC';
+        submitBtn.style.color = 'white';
+        submitBtn.style.border = 'none';
+        submitBtn.style.borderRadius = '4px';
+        submitBtn.style.cursor = 'pointer';
+        submitBtn.style.fontWeight = 'bold';
+        form.appendChild(submitBtn);
+
+        menu.appendChild(form);
+
+        // Logic for enabling/disabling
+        const videoRadios = form.querySelectorAll('input[name="gm-video"]');
+        const audioRadios = form.querySelectorAll('input[name="gm-audio"]');
+        const mergeCheckbox = document.getElementById('gm-merge-checkbox');
+
+        function updateState() {
+            const selectedVideoVal = form.querySelector('input[name="gm-video"]:checked').value;
+            const selectedAudioVal = form.querySelector('input[name="gm-audio"]:checked').value;
+            
+            const isVideoSelected = selectedVideoVal !== "-1";
+            const isAudioSelected = selectedAudioVal !== "-1";
+            const isLegacy = isVideoSelected && videos[selectedVideoVal].type === 'legacy';
+
+            if (isLegacy) {
+                audioRadios.forEach(r => { r.disabled = true; });
+                mergeCheckbox.disabled = true;
+            } else {
+                audioRadios.forEach(r => r.disabled = false);
+                if (isVideoSelected && isAudioSelected) {
+                    mergeCheckbox.disabled = false;
+                } else {
+                    mergeCheckbox.disabled = true;
+                }
+            }
+        }
+
+        videoRadios.forEach(r => r.addEventListener('change', updateState));
+        audioRadios.forEach(r => r.addEventListener('change', updateState));
+        
+        updateState(); // Initialize state
+
+        submitBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const vIdx = form.querySelector('input[name="gm-video"]:checked').value;
+            const aIdx = form.querySelector('input[name="gm-audio"]:checked').value;
+            const doMerge = mergeCheckbox.checked;
+
+            const selectedVideo = vIdx !== "-1" ? videos[vIdx] : null;
+            let selectedAudio = aIdx !== "-1" ? audios[aIdx] : null;
+            
+            if (selectedVideo && selectedVideo.type === 'legacy') {
+                selectedAudio = null;
+            }
+
+            if (!selectedVideo && !selectedAudio) {
+                alert('请至少选择一项下载内容');
+                return;
+            }
+
+            executeDownload(selectedVideo, selectedAudio, doMerge, menu);
+        };
+
         menu.style.display = 'block';
     }
 
     // ================= 下载模块 =================
-    async function downloadDirect(url, filename, menu) {
-        log('downloadDirect start', { url, filename });
-        startTask("🚀 正在下载直链视频...", "");
-        setupProgressUI(menu);
-        try {
-            const result = await downloadNativeFile(url, filename, (event) => updateNativeProgress(event));
-            log('downloadDirect complete', { filename });
-            finishTask(menu, { savedPaths: result && result.filePath ? [result.filePath] : [] });
-        } catch (e) {
-            console.error('[zeeie_downloader] downloadDirect error', e);
-            finishTask(menu, { isError: true });
-        }
-    }
-
-    async function downloadSeparate(vUrl, aUrl, title, quality, menu, audioExt = '.m4a') {
-        log('downloadSeparate start', { vUrl, aUrl, title, quality, audioExt });
-        startTask("⚠️ 分离下载模式 (视频+最佳音频)",
-            `1. 正在下载视频轨道...<br>2. 随后下载音频轨道。<br><b>👉 提示：</b>两者下载后放在同一文件夹，播放器会自动加载音频。`);
+    async function executeDownload(video, audio, doMerge, menu) {
+        log('executeDownload', { video, audio, doMerge });
+        startTask("🚀 正在发送下载请求...", "");
         setupProgressUI(menu);
 
         try {
-            const savedPaths = [];
-            const videoResult = await downloadNativeFile(vUrl, `${title}_${quality}_视频.mp4`, (event) => {
-                updateNativeProgress(event, 50, "正在下载视频");
-            });
-            if (videoResult && videoResult.filePath) savedPaths.push(videoResult.filePath);
-
-            if (aUrl) {
-                const audioResult = await downloadNativeFile(aUrl, `${title}_${quality}_音频${audioExt}`, (event) => {
-                    updateNativeProgress(event, 50, "正在下载音频", 50);
+            if (doMerge && video && audio) {
+                const result = await downloadNativeFile({
+                    url: video.url,
+                    audioUrl: audio.url,
+                    merge: true,
+                    fileName: `${getTitle()}_${video.name}_合并.mp4`
+                }, (event) => {
+                    if (event.partName === 'video') {
+                        updateNativeProgress(event, 50, "下载视频");
+                    } else if (event.partName === 'audio') {
+                        updateNativeProgress(event, 50, "下载音频", 50);
+                    } else {
+                        updateNativeProgress(event);
+                    }
                 });
-                if (audioResult && audioResult.filePath) savedPaths.push(audioResult.filePath);
+                finishTaskWithId(result.taskId, menu);
+            } else {
+                if (video) {
+                    const result = await downloadNativeFile({
+                        url: video.url,
+                        fileName: `${getTitle()}_${video.name}${video.type === 'legacy' ? '.mp4' : '_视频.mp4'}`
+                    }, (event) => updateNativeProgress(event, audio ? 50 : 100, "下载视频"));
+                    if (!audio) finishTaskWithId(result.taskId, menu);
+                }
+                if (audio) {
+                    const result = await downloadNativeFile({
+                        url: audio.url,
+                        fileName: `${getTitle()}_${audio.name}_音频${audio.ext}`
+                    }, (event) => updateNativeProgress(event, video ? 50 : 100, "下载音频", video ? 50 : 0));
+                    finishTaskWithId(result.taskId, menu);
+                }
             }
-            log('downloadSeparate complete', { title, quality });
-            finishTask(menu, { savedPaths: savedPaths });
         } catch (e) {
-            console.error('[zeeie_downloader] downloadSeparate error', e);
+            console.error('[zeeie_downloader] executeDownload error', e);
             finishTask(menu, { isError: true });
         }
     }
 
-    async function downloadAudioOnly(url, filename, menu) {
-        log('downloadAudioOnly start', { url, filename });
-        startTask("🎵 正在下载音频...", "正在获取最高音质流...");
-        setupProgressUI(menu);
-
+    async function finishTaskWithId(taskId, menu) {
         try {
-            const result = await downloadNativeFile(url, filename, (event) => updateNativeProgress(event));
-            log('downloadAudioOnly complete', { filename });
-            finishTask(menu, { savedPaths: result && result.filePath ? [result.filePath] : [] });
+            if (typeof Zeeie_getDownloadSnapshot === 'function') {
+                const snapshot = await Zeeie_getDownloadSnapshot();
+                const record = snapshot.find(r => r.taskId === taskId);
+                if (record && record.fileName) {
+                    finishTask(menu, { savedPaths: [record.fileName] });
+                    return;
+                }
+            }
+            finishTask(menu, { savedPaths: ['下载已加入队列 (ID: ' + taskId + ')'] });
         } catch (e) {
-            console.error('[zeeie_downloader] downloadAudioOnly error', e);
-            finishTask(menu, { isError: true });
+            finishTask(menu, { savedPaths: ['下载已加入队列 (ID: ' + taskId + ')'] });
         }
     }
 
@@ -454,11 +608,13 @@
     }
 
     // ================= Network & File Utilities =================
-    function downloadNativeFile(url, fileName, onProgress) {
-        log('downloadNativeFile call', { url, fileName, hasBridge: typeof Zeeie_downloadFile === 'function' });
+    function downloadNativeFile(options, onProgress) {
+        log('downloadNativeFile call', { options, hasBridge: typeof Zeeie_downloadFile === 'function' });
         return Zeeie_downloadFile({
-            url: url,
-            fileName: fileName,
+            url: options.url,
+            audioUrl: options.audioUrl,
+            merge: options.merge,
+            fileName: options.fileName,
             headers: {
                 "Referer": location.href,
                 "User-Agent": navigator.userAgent
@@ -519,5 +675,5 @@
     function getCid() { return (unsafeWindow.__INITIAL_STATE__?.videoData?.cid) || (unsafeWindow.player?.getVideoInfo()?.cid); }
     function getTitle() { return (document.querySelector('h1.video-title')?.innerText || document.title).replace(/[\\/:*?"<>|]/g, "_"); }
 
-    init();
+    startWhenVideoPage();
 })();

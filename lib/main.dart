@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
@@ -7,6 +8,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
+import 'ffmpeg_helper.dart';
 import 'user_script_manager.dart';
 import 'user_script_repository.dart';
 import 'user_script_storage.dart';
@@ -14,6 +16,8 @@ import 'webview/download_service.dart';
 import 'webview/fullscreen_controller.dart';
 import 'webview/webview_bridge.dart';
 import 'package:window_manager/window_manager.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,6 +48,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
       home: const HomePage(),
@@ -94,7 +99,12 @@ class _HomePageState extends State<HomePage>
     super.initState();
 
     _fullscreenController = FullscreenController();
-    _downloadService = DownloadService();
+    _downloadService = DownloadService(
+      ffmpegHelper: FFmpegHelper(
+        onDownloadRequested: _showFfmpegDownloadConfirmDialog,
+        runWithLoading: _runWithFfmpegLoadingOverlay,
+      ),
+    );
     _downloadService.init();
     _webViewBridge = WebViewBridge(
       getAllScripts: () => _allScripts,
@@ -165,6 +175,66 @@ class _HomePageState extends State<HomePage>
     ];
 
     _loadUserScripts();
+  }
+
+  Future<bool> _showFfmpegDownloadConfirmDialog() async {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return false;
+    final result = await showDialog<bool>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('需要 FFmpeg'),
+        content: const Text(
+          '合并音视频需要 FFmpeg。未在系统 PATH 中找到，是否自动下载到应用目录？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('下载'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  Future<void> _runWithFfmpegLoadingOverlay(Future<void> Function() task) async {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) {
+      await task();
+      return;
+    }
+    unawaited(
+      showDialog(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (context) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(
+                  '正在下载 FFmpeg，请稍候…',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await task();
+    if (navigatorKey.currentContext != null) {
+      Navigator.of(navigatorKey.currentContext!).pop();
+    }
   }
 
   Future<void> _startServer() async {
