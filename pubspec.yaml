@@ -72,7 +72,7 @@ flutter:
   #   - images/a_dot_ham.jpeg
   assets:
     - assets/web/
-    - assets/web/settings.html
+    - assets/web/styles/
     - assets/icons/bilibili.svg
     - assets/icons/pixiv.svg
     - assets/scripts/

@@ -149,7 +149,7 @@ class _HomePageState extends State<HomePage>
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     final random = math.Random();
-    _stars = List.generate(1000, (index) {
+    _stars = List.generate(300, (index) {
       return Star(
         x: random.nextDouble() * 3000,
         y: random.nextDouble() * 2000,

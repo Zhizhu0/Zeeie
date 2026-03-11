@@ -14,9 +14,18 @@
 (function() {
     'use strict';
 
+    if (window.__ZEEIE_BILI_DOWNLOADER_INITIALIZED__) {
+        return;
+    }
+    window.__ZEEIE_BILI_DOWNLOADER_INITIALIZED__ = true;
+
     const BTN_ID = 'gm-bili-download-btn';
     const CONTAINER_ID = 'gm-bili-btn-container';
     const MENU_ID = 'gm-bili-quality-menu';
+    const STYLE_ID = 'gm-bili-download-style';
+    let initStarted = false;
+    let injectIntervalId = null;
+    let pageWatchIntervalId = null;
 
     function log() {
         try {
@@ -30,6 +39,8 @@
     // ================= 状态管理 =================
     const taskState = {
         isRunning: false,
+        isFetchingInfo: false,
+        isSubmitting: false,
         title: '',
         tip: '',
         lastPercent: 0,
@@ -39,8 +50,12 @@
     };
 
     // ================= 样式 =================
-    const style = document.createElement('style');
-    style.innerHTML = `
+    function ensureStyleInjected() {
+        if (document.getElementById(STYLE_ID)) return true;
+        if (!document.head) return false;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.innerHTML = `
         #${CONTAINER_ID} {
             position: relative;
             display: inline-block;
@@ -107,7 +122,9 @@
         .gm-progress-fill { height: 100%; background: #00AEEC; width: 0%; transition: width 0.1s linear; }
         .gm-tip { font-size: 11px; color: #999; margin-top: 8px; text-align: left; padding: 0 5px; line-height: 1.5; }
     `;
-    document.head.appendChild(style);
+        document.head.appendChild(style);
+        return true;
+    }
 
     // ================= 初始化 =================
     const VIDEO_PATH_PREFIX = '/video/';
@@ -116,8 +133,13 @@
     }
 
     function init() {
+        if (initStarted) return;
+        initStarted = true;
         if (!isVideoPage()) return;
-        setInterval(() => checkAndInject(), 1500);
+        if (injectIntervalId != null) {
+            clearInterval(injectIntervalId);
+        }
+        injectIntervalId = setInterval(() => checkAndInject(), 1500);
         checkAndInject();
     }
 
@@ -127,9 +149,13 @@
             return;
         }
         log('not video page yet, watching URL');
-        const t = setInterval(() => {
+        if (pageWatchIntervalId != null) {
+            clearInterval(pageWatchIntervalId);
+        }
+        pageWatchIntervalId = setInterval(() => {
             if (!isVideoPage()) return;
-            clearInterval(t);
+            clearInterval(pageWatchIntervalId);
+            pageWatchIntervalId = null;
             log('video page detected, init');
             init();
         }, 500);
@@ -137,6 +163,7 @@
 
     function checkAndInject() {
         if (!isVideoPage()) return;
+        if (!ensureStyleInjected()) return;
         const toolbar = document.querySelector('.video-toolbar-right') ||
             document.querySelector('.video-toolbar .right') ||
             document.querySelector('#arc_toolbar_report') ||
@@ -173,7 +200,18 @@
 
             btn.onclick = (e) => {
                 e.stopPropagation();
-                log('download button clicked', { running: taskState.isRunning });
+                if (taskState.isFetchingInfo || taskState.isSubmitting) {
+                    log('download button ignored', {
+                        isFetchingInfo: taskState.isFetchingInfo,
+                        isSubmitting: taskState.isSubmitting
+                    });
+                    return;
+                }
+                log('download button clicked', {
+                    running: taskState.isRunning,
+                    isFetchingInfo: taskState.isFetchingInfo,
+                    isSubmitting: taskState.isSubmitting
+                });
                 const menuEl = document.getElementById(MENU_ID);
                 if(menuEl.style.display === 'block') {
                     menuEl.style.display = 'none';
@@ -216,13 +254,24 @@
     // ================= 数据获取 =================
     async function fetchVideoInfo() {
         const btn = document.getElementById(BTN_ID);
+        if (!btn || taskState.isFetchingInfo) return;
+        taskState.isFetchingInfo = true;
         btn.innerText = '⌛ 查询中...';
         const bvid = getBvid();
         const cid = getCid();
         log('fetchVideoInfo start', { bvid, cid });
 
         if (!bvid || !cid) {
-            setTimeout(() => { if(getBvid()) fetchVideoInfo(); else { btn.innerText = '📥 下载选项'; alert('无法获取信息'); } }, 1000);
+            setTimeout(() => {
+                if (getBvid()) {
+                    taskState.isFetchingInfo = false;
+                    fetchVideoInfo();
+                } else {
+                    taskState.isFetchingInfo = false;
+                    btn.innerText = '📥 下载选项';
+                    alert('无法获取信息');
+                }
+            }, 1000);
             return;
         }
 
@@ -247,6 +296,8 @@
         } catch (e) {
             console.error('[zeeie_downloader] fetchVideoInfo error', e);
             btn.innerText = '❌ 错误';
+        } finally {
+            taskState.isFetchingInfo = false;
         }
     }
 
@@ -452,6 +503,10 @@
         submitBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            if (taskState.isSubmitting) {
+                log('submit ignored', { reason: 'already-submitting' });
+                return;
+            }
             const vIdx = form.querySelector('input[name="gm-video"]:checked').value;
             const aIdx = form.querySelector('input[name="gm-audio"]:checked').value;
             const doMerge = mergeCheckbox.checked;
@@ -468,6 +523,9 @@
                 return;
             }
 
+            taskState.isSubmitting = true;
+            submitBtn.disabled = true;
+            submitBtn.innerText = '下载中...';
             executeDownload(selectedVideo, selectedAudio, doMerge, menu);
         };
 
@@ -516,6 +574,8 @@
         } catch (e) {
             console.error('[zeeie_downloader] executeDownload error', e);
             finishTask(menu, { isError: true });
+        } finally {
+            taskState.isSubmitting = false;
         }
     }
 
