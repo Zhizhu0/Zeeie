@@ -19,7 +19,7 @@ class FullscreenController {
 
       if (_wasMaximizedBeforeFullscreen) {
         await windowManager.unmaximize();
-        await Future.delayed(const Duration(milliseconds: 100));
+        // await Future.delayed(const Duration(milliseconds: 100));
       }
 
       _previousBounds = await windowManager.getBounds();

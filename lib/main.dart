@@ -327,7 +327,7 @@ class _HomePageState extends State<HomePage>
       await localhostServer.close();
 
       // 2. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
-      await _fullscreenController.restoreWindowBeforeClose();
+      // await _fullscreenController.restoreWindowBeforeClose();
 
       // 3. 解除对窗口关闭的阻止
       await windowManager.setPreventClose(false);

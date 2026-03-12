@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站首页精细化屏蔽器 (含轮播图隐藏)
-// @version      2.7
-// @description  精准屏蔽B站首页的广告等内容。点击齿轮图标设置，设置仅在首页显示。
+// @version      2.9
+// @description  精准屏蔽B站首页和播放页的广告等内容。点击齿轮图标设置。
 // @author       Zeeie
 // @match        https://www.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
@@ -15,7 +15,7 @@
     'use strict';
 
     // --- 1. 配置管理 ---
-    const CONFIG_KEY = 'bili_fine_filter_config_v2_4';
+    const CONFIG_KEY = 'bili_fine_filter_config_v2_5';
     const defaultConfig = {
         showCarousel: true,   // 轮播图
         showAds: true,        // 广告
@@ -30,8 +30,36 @@
         showTv: true,         // 电视剧
         showDoc: true,        // 纪录片
         showClass: true,      // 课堂
+        showVideoPagePromo: true,   // 播放页推广
+        showVideoPageGame: true,   // 播放页游戏推荐
     };
     let config = { ...defaultConfig, ...GM_getValue(CONFIG_KEY, {}) };
+
+    const MSG_REQUEST_CONFIG = 'bili-filter-request-config';
+    const MSG_SEND_CONFIG = 'bili-filter-config';
+    const BILI_ORIGIN = 'https://www.bilibili.com';
+
+    // 向 iframe 推送最新配置（首页修改设置时调用）
+    function syncConfigToIframe() {
+        try {
+            const iframe = document.getElementById('bi-video-iframe');
+            if (iframe && iframe.contentWindow && iframe.src && iframe.src.startsWith(BILI_ORIGIN)) {
+                iframe.contentWindow.postMessage({ type: MSG_SEND_CONFIG, config: { ...config } }, BILI_ORIGIN);
+            }
+        } catch (e) {}
+    }
+
+    // 应用从父窗口收到的配置（iframe 内播放页使用）
+    function applyConfigFromParent(newConfig) {
+        if (newConfig && typeof newConfig === 'object') {
+            Object.keys(defaultConfig).forEach(k => {
+                if (Object.prototype.hasOwnProperty.call(newConfig, k)) {
+                    config[k] = newConfig[k];
+                }
+            });
+            applyVideoPageFilters();
+        }
+    }
 
     // --- 2. 样式注入 ---
     const css = `
@@ -234,13 +262,36 @@
         });
     }
 
-    // --- 6. 检查按钮显隐 ---
+    // --- 5b. 播放页过滤 ---
+    function applyVideoPageFilters() {
+        if (!/^\/video\//.test(window.location.pathname)) return;
+
+        const promoNodes = document.querySelectorAll('.video-card-ad-small');
+        promoNodes.forEach(node => {
+            if (!config.showVideoPagePromo) {
+                if (node.style.display !== 'none') node.style.setProperty('display', 'none', 'important');
+            } else {
+                if (node.style.display === 'none') node.style.removeProperty('display');
+            }
+        });
+
+        const gameNodes = document.querySelectorAll('.video-page-game-card-small');
+        gameNodes.forEach(node => {
+            if (!config.showVideoPageGame) {
+                if (node.style.display !== 'none') node.style.setProperty('display', 'none', 'important');
+            } else {
+                if (node.style.display === 'none') node.style.removeProperty('display');
+            }
+        });
+    }
+
+    // --- 6. 检查按钮显隐（仅首页显示，可同时控制首页和播放页）---
     function checkButtonVisibility() {
         const panel = document.getElementById('bili-filter-panel');
         if (!panel) return;
         const isHomePage = window.location.pathname === '/';
         panel.style.display = isHomePage ? 'flex' : 'none';
-        if(!isHomePage) panel.classList.remove('active'); // 离开首页时自动收起
+        if (!isHomePage) panel.classList.remove('active');
     }
 
     // --- 7. UI 构建 ---
@@ -273,7 +324,7 @@
         const titleRow = document.createElement('div');
         titleRow.className = 'bf-title';
         const titleText = document.createElement('span');
-        titleText.innerText = '首页内容过滤';
+        titleText.innerText = 'B站内容过滤';
 
         // 增加一个小关闭按钮 (可选)
         const closeBtn = document.createElement('span');
@@ -300,6 +351,8 @@
             { key: 'showTv', label: '电视剧' },
             { key: 'showDoc', label: '纪录片' },
             { key: 'showClass', label: '课堂/课程' },
+            { key: 'showVideoPagePromo', label: '播放页推广' },
+            { key: 'showVideoPageGame', label: '播放页游戏推荐' },
         ];
 
         options.forEach(opt => {
@@ -316,6 +369,8 @@
                 config[opt.key] = e.target.checked;
                 GM_setValue(CONFIG_KEY, config);
                 applyFilters();
+                applyVideoPageFilters();
+                syncConfigToIframe();
             };
             const slider = document.createElement('span');
             slider.className = 'bf-slider';
@@ -328,7 +383,7 @@
 
         const footer = document.createElement('div');
         footer.className = 'bf-footer';
-        footer.innerText = 'v2.7 点击展开/收起';
+        footer.innerText = 'v2.9';
         menu.appendChild(footer);
 
         panel.appendChild(handle);
@@ -345,7 +400,32 @@
         checkButtonVisibility();
     }
 
-    // --- 8. 启动 ---
+    // --- 8. postMessage 跨帧配置同步 ---
+    function setupConfigSync() {
+        if (window.self !== window.top) {
+            // iframe 内（播放页）：请求父窗口配置，并监听配置推送
+            window.addEventListener('message', function(e) {
+                if (e.origin !== BILI_ORIGIN) return;
+                if (e.data && e.data.type === MSG_SEND_CONFIG) {
+                    applyConfigFromParent(e.data.config);
+                }
+            });
+            window.parent.postMessage({ type: MSG_REQUEST_CONFIG }, BILI_ORIGIN);
+        } else {
+            // 父窗口（首页）：响应 iframe 的配置请求，并在修改时主动推送
+            window.addEventListener('message', function(e) {
+                if (e.origin !== BILI_ORIGIN) return;
+                if (e.data && e.data.type === MSG_REQUEST_CONFIG && e.source) {
+                    try {
+                        e.source.postMessage({ type: MSG_SEND_CONFIG, config: { ...config } }, BILI_ORIGIN);
+                    } catch (err) {}
+                }
+            });
+        }
+    }
+    setupConfigSync();
+
+    // --- 9. 启动 ---
     let observer = null;
     function init() {
         createUI();
@@ -362,10 +442,24 @@
                         break;
                     }
                 }
-                if(shouldUpdate) requestAnimationFrame(applyFilters);
+                if (shouldUpdate) requestAnimationFrame(applyFilters);
             });
             const targetNode = document.querySelector('.bili-feed4-layout') || document.body;
             observer.observe(targetNode, { childList: true, subtree: true });
+        } else if (/^\/video\//.test(window.location.pathname)) {
+            applyVideoPageFilters();
+            if (observer) observer.disconnect();
+            observer = new MutationObserver((mutations) => {
+                let shouldUpdate = false;
+                for (let m of mutations) {
+                    if (m.addedNodes.length > 0) {
+                        shouldUpdate = true;
+                        break;
+                    }
+                }
+                if (shouldUpdate) requestAnimationFrame(applyVideoPageFilters);
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
         } else {
             if (observer) observer.disconnect();
         }
