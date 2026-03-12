@@ -68,7 +68,10 @@ class _HomePageState extends State<HomePage>
   late AnimationController _controller;
 
   // 本地服务器相关
-  late InAppLocalhostServer localhostServer;
+  InAppLocalhostServer? _localhostServer;
+  Future<void>? _serverStartFuture;
+  bool _serverStarted = false;
+  bool _isClosing = false;
   int _actualPort = 8080;
 
   // 极光动画相关
@@ -238,13 +241,25 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _startServer() async {
-    var socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-    _actualPort = socket.port;
-    await socket.close();
+    // Keep a handle so close can await startup completion.
+    _serverStartFuture = () async {
+      final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      _actualPort = socket.port;
+      await socket.close();
 
-    localhostServer = InAppLocalhostServer(port: _actualPort);
-    await localhostServer.start();
-    setState(() {});
+      final server = InAppLocalhostServer(port: _actualPort);
+      _localhostServer = server;
+      await server.start();
+      _serverStarted = true;
+      if (!mounted) return;
+      setState(() {});
+    }();
+    try {
+      await _serverStartFuture;
+    } catch (e) {
+      // Startup failure should not crash the app; it may be closed quickly.
+      debugPrint("本地服务器启动失败: $e");
+    }
   }
 
   Future<void> _loadUserScripts() async {
@@ -314,7 +329,11 @@ class _HomePageState extends State<HomePage>
   @override
   void dispose() {
     windowManager.removeListener(this);
-    // localhostServer.close();
+    // Best-effort cleanup; do not await in dispose.
+    final server = _localhostServer;
+    if (server != null) {
+      unawaited(server.close());
+    }
     _downloadService.dispose();
     _controller.dispose();
     super.dispose();
@@ -322,23 +341,54 @@ class _HomePageState extends State<HomePage>
 
   @override
   void onWindowClose() async {
+    if (_isClosing) return;
+    _isClosing = true;
+    // Hide immediately to make "close" feel instant.
     try {
-      // 1. 异步安全地关闭本地服务器 (必须 await)
-      await localhostServer.close();
+      await windowManager.hide();
+    } catch (_) {}
+    try {
+      // 1. 等待本地服务器启动流程结束（如果还在启动）
+      final startFuture = _serverStartFuture;
+      if (startFuture != null) {
+        try {
+          await startFuture;
+        } catch (_) {
+          // Ignore startup errors during shutdown.
+        }
+      }
 
-      // 2. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
-      // await _fullscreenController.restoreWindowBeforeClose();
+      // 2. 异步安全地关闭本地服务器（如果已初始化）
+      final server = _localhostServer;
+      Future<void> closeServer() async {
+        if (server != null && _serverStarted) {
+          await server.close();
+        }
+      }
 
-      // 3. 解除对窗口关闭的阻止
+      // 3. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
+      await _fullscreenController.restoreWindowBeforeClose();
+
+      // 4. Don't let slow cleanup block exit forever.
+      await Future.any([
+        closeServer(),
+        Future<void>.delayed(const Duration(milliseconds: 600)),
+      ]);
+
+      // 5. 解除对窗口关闭的阻止
       await windowManager.setPreventClose(false);
 
-      // 4. 彻底销毁并退出应用
+      // 6. 彻底销毁并退出应用
       await windowManager.destroy();
     } catch (e) {
       debugPrint("关闭时发生错误: $e");
       // 无论如何，最后一定要保底退出
-      await windowManager.setPreventClose(false);
-      await windowManager.destroy();
+      try {
+        await windowManager.setPreventClose(false);
+      } catch (_) {}
+      try {
+        await windowManager.destroy();
+      } catch (_) {}
     }
   }
 
