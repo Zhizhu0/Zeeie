@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui';
@@ -7,9 +8,16 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
+import 'ffmpeg_helper.dart';
 import 'user_script_manager.dart';
+import 'user_script_repository.dart';
+import 'user_script_storage.dart';
+import 'webview/download_service.dart';
+import 'webview/fullscreen_controller.dart';
+import 'webview/webview_bridge.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:screen_retriever/screen_retriever.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,7 +28,7 @@ void main() async {
     size: Size(800, 600),
     center: true,
   );
-  
+
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
@@ -29,6 +37,7 @@ void main() async {
   });
 
   await UserScriptManager.init();
+  await UserScriptRepository.instance.init();
 
   runApp(const MyApp());
 }
@@ -39,6 +48,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
       home: const HomePage(),
@@ -53,11 +63,15 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin, WindowListener {
+class _HomePageState extends State<HomePage>
+    with TickerProviderStateMixin, WindowListener {
   late AnimationController _controller;
 
   // 本地服务器相关
-  late InAppLocalhostServer localhostServer;
+  InAppLocalhostServer? _localhostServer;
+  Future<void>? _serverStartFuture;
+  bool _serverStarted = false;
+  bool _isClosing = false;
   int _actualPort = 8080;
 
   // 极光动画相关
@@ -73,44 +87,64 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
   // --- 页面控制逻辑 ---
   int _currentIndex = 0;
 
-  // --- InAppWebView 控制器 ---
-  InAppWebViewController? _webViewController;
-
   late List<AppItem> myApps;
 
-  UserScript? _biliUserScript;
-  List<UserScriptConfig> ScriptsList = [];
+  final List<UserScriptConfig> _allScripts = [];
+  List<UserScriptConfig> _enabledScripts = [];
+  int _webViewRevision = 0;
 
-  final GlobalKey webViewKey = GlobalKey();
-  InAppWebViewController? webViewController;
-  bool _isFullscreen = false;
-
-  Rect? _previousBounds;
-  bool _wasMaximizedBeforeFullscreen = false; 
+  late final FullscreenController _fullscreenController;
+  late final DownloadService _downloadService;
+  late final WebViewBridge _webViewBridge;
 
   @override
   void initState() {
     super.initState();
 
+    _fullscreenController = FullscreenController();
+    _downloadService = DownloadService(
+      ffmpegHelper: FFmpegHelper(
+        onDownloadRequested: _showFfmpegDownloadConfirmDialog,
+        runWithLoading: _runWithFfmpegLoadingOverlay,
+      ),
+    );
+    _downloadService.init();
+    _webViewBridge = WebViewBridge(
+      getAllScripts: () => _allScripts,
+      isLockEffective: _isLockEffective,
+      isScriptEnabled: _isScriptEnabled,
+      onScriptSettingsChanged: _handleScriptSettingsChanged,
+      reloadUserScripts: _reloadUserScripts,
+      onFullscreenChanged: _handleFullscreenChanged,
+      fullscreenController: _fullscreenController,
+      downloadService: _downloadService,
+    );
+
     windowManager.addListener(this);
 
     _startServer();
-    
+
     // 初始化动画
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 15),
     )..repeat(reverse: true);
 
-    _blob1Anim = Tween<Offset>(
-      begin: const Offset(-100, 0),
-      end: const Offset(100, 50),
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine));
+    _blob1Anim =
+        Tween<Offset>(
+          begin: const Offset(-100, 0),
+          end: const Offset(100, 50),
+        ).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine),
+        );
 
-    _blob2Anim = Tween<Offset>(
-      begin: const Offset(50, 0),
-      end: const Offset(-50, 100),
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutQuad));
+    _blob2Anim =
+        Tween<Offset>(
+          begin: const Offset(50, 0),
+          end: const Offset(-50, 100),
+        ).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOutQuad),
+        );
 
     _blob3Anim = Tween<Offset>(
       begin: const Offset(0, -50),
@@ -118,7 +152,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     final random = math.Random();
-    _stars = List.generate(1000, (index) {
+    _stars = List.generate(300, (index) {
       return Star(
         x: random.nextDouble() * 3000,
         y: random.nextDouble() * 2000,
@@ -129,73 +163,232 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
     // 初始化 App 列表
     myApps = [
-      _buildAppItem("bilibili", "assets/icons/bilibili.svg", "https://www.bilibili.com/"),
-      _buildAppItem("Pixiv", "assets/icons/pixiv.svg", "https://www.pixiv.net/"),
+      _buildAppItem(
+        "bilibili",
+        "assets/icons/bilibili.svg",
+        "https://www.bilibili.com/",
+      ),
+      _buildAppItem(
+        "Pixiv",
+        "assets/icons/pixiv.svg",
+        "https://www.pixiv.net/",
+      ),
+      _buildAppItem("下载管理", Icons.download_rounded, "assets/web/downloads.html"),
       _buildAppItem("设置", Icons.settings, "assets/web/settings.html"),
     ];
 
     _loadUserScripts();
   }
 
-  Future<void> _startServer() async {
-    var socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-    _actualPort = socket.port;
-    await socket.close();
+  Future<bool> _showFfmpegDownloadConfirmDialog() async {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return false;
+    final result = await showDialog<bool>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('需要 FFmpeg'),
+        content: const Text(
+          '合并音视频需要 FFmpeg。未在系统 PATH 中找到，是否自动下载到应用目录？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('下载'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
 
-    localhostServer = InAppLocalhostServer(port: _actualPort);
-    await localhostServer.start();
-    setState(() {});
+  Future<void> _runWithFfmpegLoadingOverlay(Future<void> Function() task) async {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) {
+      await task();
+      return;
+    }
+    unawaited(
+      showDialog(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (context) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(
+                  '正在下载 FFmpeg，请稍候…',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await task();
+    if (navigatorKey.currentContext != null) {
+      Navigator.of(navigatorKey.currentContext!).pop();
+    }
+  }
+
+  Future<void> _startServer() async {
+    // Keep a handle so close can await startup completion.
+    _serverStartFuture = () async {
+      final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      _actualPort = socket.port;
+      await socket.close();
+
+      final server = InAppLocalhostServer(port: _actualPort);
+      _localhostServer = server;
+      await server.start();
+      _serverStarted = true;
+      if (!mounted) return;
+      setState(() {});
+    }();
+    try {
+      await _serverStartFuture;
+    } catch (e) {
+      // Startup failure should not crash the app; it may be closed quickly.
+      debugPrint("本地服务器启动失败: $e");
+    }
   }
 
   Future<void> _loadUserScripts() async {
     try {
-      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
-  
-      final List<String> scripts = manifest.listAssets()
-        .where((String key) => key.startsWith('assets/scripts/') && !key.startsWith('assets/scripts/shims/'))
-        .toList();
-      
+      final AssetManifest manifest = await AssetManifest.loadFromAssetBundle(
+        rootBundle,
+      );
+
+      final List<String> scripts = manifest
+          .listAssets()
+          .where(
+            (String key) =>
+                key.startsWith('assets/scripts/') &&
+                !key.startsWith('assets/scripts/shims/'),
+          )
+          .toList();
+      final nextScripts = <UserScriptConfig>[];
+
       for (var scriptPath in scripts) {
         String jsContent = await rootBundle.loadString(scriptPath);
-        
-        var config = UserScriptManager.parse(jsContent);
-        ScriptsList.add(config);
+
+        var config = UserScriptManager.parse(
+          jsContent,
+          scriptPath: scriptPath,
+          sourceType: 'system',
+        );
+        nextScripts.add(config);
       }
+
+      for (final stored in UserScriptRepository.instance.listScripts()) {
+        final config = UserScriptManager.parse(
+          stored.content,
+          scriptPath: stored.scriptId,
+          scriptIdOverride: stored.scriptId,
+          sourceType: 'user',
+        );
+        nextScripts.add(config);
+      }
+
+      if (!mounted) {
+        _allScripts
+          ..clear()
+          ..addAll(nextScripts);
+        _rebuildEnabledScripts();
+        return;
+      }
+
+      setState(() {
+        _allScripts
+          ..clear()
+          ..addAll(nextScripts);
+        _rebuildEnabledScripts();
+      });
     } catch (e) {
       debugPrint("Failed to load user script: $e");
     }
   }
 
+  Future<void> _reloadUserScripts() async {
+    await _loadUserScripts();
+    if (!mounted) return;
+    setState(() {
+      _webViewRevision++;
+    });
+  }
+
   @override
   void dispose() {
     windowManager.removeListener(this);
-    // localhostServer.close();
+    // Best-effort cleanup; do not await in dispose.
+    final server = _localhostServer;
+    if (server != null) {
+      unawaited(server.close());
+    }
+    _downloadService.dispose();
     _controller.dispose();
     super.dispose();
   }
 
   @override
   void onWindowClose() async {
+    if (_isClosing) return;
+    _isClosing = true;
+    // Hide immediately to make "close" feel instant.
     try {
-      // 1. 异步安全地关闭本地服务器 (必须 await)
-      await localhostServer.close();
-
-      // 2. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
-      if (_isFullscreen) {
-        await windowManager.setAlwaysOnTop(false);
-        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      await windowManager.hide();
+    } catch (_) {}
+    try {
+      // 1. 等待本地服务器启动流程结束（如果还在启动）
+      final startFuture = _serverStartFuture;
+      if (startFuture != null) {
+        try {
+          await startFuture;
+        } catch (_) {
+          // Ignore startup errors during shutdown.
+        }
       }
 
-      // 3. 解除对窗口关闭的阻止
+      // 2. 异步安全地关闭本地服务器（如果已初始化）
+      final server = _localhostServer;
+      Future<void> closeServer() async {
+        if (server != null && _serverStarted) {
+          await server.close();
+        }
+      }
+
+      // 3. 如果你在全屏状态下关闭了应用，建议先把状态还原，防止句柄泄露
+      await _fullscreenController.restoreWindowBeforeClose();
+
+      // 4. Don't let slow cleanup block exit forever.
+      await Future.any([
+        closeServer(),
+        Future<void>.delayed(const Duration(milliseconds: 600)),
+      ]);
+
+      // 5. 解除对窗口关闭的阻止
       await windowManager.setPreventClose(false);
 
-      // 4. 彻底销毁并退出应用
+      // 6. 彻底销毁并退出应用
       await windowManager.destroy();
     } catch (e) {
       debugPrint("关闭时发生错误: $e");
       // 无论如何，最后一定要保底退出
-      await windowManager.setPreventClose(false);
-      await windowManager.destroy();
+      try {
+        await windowManager.setPreventClose(false);
+      } catch (_) {}
+      try {
+        await windowManager.destroy();
+      } catch (_) {}
     }
   }
 
@@ -251,20 +444,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
           // --- 层2: 星空粒子 ---
           Positioned.fill(
-            child: CustomPaint(
-              painter: StarFieldPainter(_controller, _stars),
-            ),
+            child: CustomPaint(painter: StarFieldPainter(_controller, _stars)),
           ),
 
           // --- 层3: 页面布局 (Sidebar + IndexedStack) ---
           Row(
             children: [
               // 侧边栏
-              if (!_isFullscreen)
-                SizedBox(
-                  width: 100,
-                  child: _buildGlassSidebar(),
-                ),
+              if (!_fullscreenController.isFullscreen)
+                SizedBox(width: 100, child: _buildGlassSidebar()),
               // 右侧内容区域
               Expanded(
                 flex: 1,
@@ -276,26 +464,35 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
                       padding: const EdgeInsets.all(40),
                       child: GridView.builder(
                         padding: const EdgeInsets.all(24),
-                        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 100,
-                          mainAxisSpacing: 20,
-                          crossAxisSpacing: 20,
-                          childAspectRatio: 0.8,
-                        ),
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: 100,
+                              mainAxisSpacing: 20,
+                              crossAxisSpacing: 20,
+                              childAspectRatio: 0.8,
+                            ),
                         itemCount: myApps.length,
                         itemBuilder: (context, index) {
                           return _buildGridItem(myApps[index]);
                         },
                       ),
                     ),
-                    
-                    for (var item in _sidebarItems) ... [
-                      _buildWebPage(item.url, ValueKey(item.url))
-                    ]
+
+                    for (var item in _sidebarItems) ...[
+                      _buildWebPage(
+                        item.url,
+                        ValueKey('${item.url}::$_webViewRevision'),
+                      ),
+                    ],
                   ],
                 ),
               ),
             ],
+          ),
+          Positioned(
+            right: 24,
+            bottom: 24,
+            child: _buildDownloadOverlay(),
           ),
         ],
       ),
@@ -306,10 +503,178 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
     return Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: color,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    );
+  }
+
+  Widget _buildDownloadOverlay() {
+    return AnimatedBuilder(
+      animation: _downloadService,
+      builder: (context, _) {
+        final active = _downloadService.activeRecords;
+        final toast = _downloadService.latestToast;
+        final showActiveOverlay =
+            active.isNotEmpty && _downloadService.shouldShowActiveOverlay;
+        if (!showActiveOverlay && toast == null) {
+          return const SizedBox.shrink();
+        }
+
+        if (showActiveOverlay) {
+          final visibleItems = active.take(3).toList();
+          return ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: _buildFloatingPanel(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.download_rounded,
+                        color: Colors.white,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '正在下载 ${active.length} 项',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () {
+                          _downloadService.dismissActiveOverlay();
+                          _openOrFocusApp(
+                            '下载管理',
+                            Icons.download_rounded,
+                            'assets/web/downloads.html',
+                          );
+                        },
+                        child: const Text('查看'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  for (final item in visibleItems) ...[
+                    _buildDownloadOverlayItem(item),
+                    if (item != visibleItems.last) const SizedBox(height: 10),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }
+
+        return ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 280),
+          child: _buildFloatingPanel(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  toast!.type == 'success'
+                      ? Icons.check_circle_outline
+                      : toast.type == 'error'
+                      ? Icons.error_outline
+                      : Icons.info_outline,
+                  color: toast.type == 'success'
+                      ? Colors.greenAccent
+                      : toast.type == 'error'
+                      ? Colors.orangeAccent
+                      : Colors.white70,
+                  size: 20,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        toast.title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        toast.message,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFloatingPanel({required Widget child}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color.fromRGBO(15, 23, 42, 0.8),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: const Color.fromRGBO(255, 255, 255, 0.12),
+            ),
+          ),
+          child: child,
+        ),
       ),
+    );
+  }
+
+  Widget _buildDownloadOverlayItem(Map<String, dynamic> item) {
+    final progressValue = ((item['progress'] as num?)?.toDouble() ?? 0) / 100;
+    final fileName =
+        item['fileName']?.toString() ??
+        item['requestedFileName']?.toString() ??
+        '未命名下载';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            minHeight: 6,
+            value: progressValue > 0 ? progressValue.clamp(0.0, 1.0) : null,
+            backgroundColor: const Color.fromRGBO(255, 255, 255, 0.08),
+            valueColor: const AlwaysStoppedAnimation<Color>(
+              Colors.lightBlueAccent,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -323,8 +688,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
             color: Color.fromRGBO(255, 255, 255, 0.05),
             border: Border(
               right: BorderSide(
-                color: Color.fromRGBO(255, 255, 255, 0.1), 
-                width: 1
+                color: Color.fromRGBO(255, 255, 255, 0.1),
+                width: 1,
               ),
             ),
           ),
@@ -332,7 +697,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
             child: Column(
               children: [
                 const SizedBox(height: 30),
-                _buildMenuItem(SidebarItem(label: "主页", url: "", icon: Icons.home_filled), 0),
+                _buildMenuItem(
+                  SidebarItem(label: "主页", url: "", icon: Icons.home_filled),
+                  0,
+                ),
 
                 for (int i = 0; i < _sidebarItems.length; i++) ...[
                   const SizedBox(height: 20),
@@ -340,7 +708,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
                 ],
               ],
             ),
-          )
+          ),
         ),
       ),
     );
@@ -349,134 +717,85 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
   Widget _buildWebPage(String url, Key key) {
     return ClipRRect(
       key: key,
-      // 沉浸式铺满：全屏时取消圆角
-      borderRadius: _isFullscreen 
-          ? BorderRadius.zero 
-          : const BorderRadius.only(
-              topLeft: Radius.circular(20), 
-              bottomLeft: Radius.circular(20)
-            ),
       child: InAppWebView(
         initialUserScripts: UnmodifiableListView<UserScript>(
-          ScriptsList.map((config) => UserScript(
-            source: UserScriptManager.generateInjectionCode(config),
-            injectionTime: config.runAt == "document-start" ? UserScriptInjectionTime.AT_DOCUMENT_START : UserScriptInjectionTime.AT_DOCUMENT_END,
-          )).toList(),
+          _enabledScripts
+              .map(
+                (config) => UserScript(
+                  source: UserScriptManager.generateInjectionCode(config),
+                  injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                  forMainFrameOnly: config.forMainFrameOnly,
+                ),
+              )
+              .toList(),
         ),
         initialUrlRequest: URLRequest(
-          url: url.startsWith('http') 
-            ? WebUri(url) 
-            : WebUri("http://localhost:$_actualPort/$url")
+          url: url.startsWith('http')
+              ? WebUri(url)
+              : WebUri("http://localhost:$_actualPort/$url"),
         ),
         initialSettings: InAppWebViewSettings(
           isInspectable: true,
-          transparentBackground: true,
           javaScriptEnabled: true,
-          allowFileAccessFromFileURLs: true, 
+          allowFileAccessFromFileURLs: true,
           allowUniversalAccessFromFileURLs: true,
-          isElementFullscreenEnabled: true, 
+          isElementFullscreenEnabled: true,
           allowsInlineMediaPlayback: true,
           allowsPictureInPictureMediaPlayback: true,
           builtInZoomControls: true,
-          displayZoomControls: false, 
+          displayZoomControls: false,
           iframeAllowFullscreen: true,
           mediaPlaybackRequiresUserGesture: false,
         ),
         onWebViewCreated: (controller) {
-          webViewController = controller;
-
-          // 注册与 JS 交互的通道
-          controller.addJavaScriptHandler(
-            handlerName: 'toggleFullscreen',
-            callback: (args) async {
-              bool shouldFullscreen = args[0] as bool;
-              
-              if (shouldFullscreen != _isFullscreen) {
-                if (shouldFullscreen) {
-                  // --- 进入全屏模式 ---
-                  
-                  // 1. 记录当前窗口状态
-                  _wasMaximizedBeforeFullscreen = await windowManager.isMaximized();
-
-                  // 3. 【核心修复】：如果是最大化，必须先“还原”窗口状态
-                  // 只有在非最大化状态下，setBounds 才能突破任务栏的封锁
-                  if (_wasMaximizedBeforeFullscreen) {
-                    await windowManager.unmaximize();
-                    await Future.delayed(const Duration(milliseconds: 100));
-                  }
-
-                  _previousBounds = await windowManager.getBounds();
-
-                  // 4. 获取显示器信息 (多屏兼容逻辑)
-                  // 找到当前窗口中心点所在的显示器，确保全屏在正确的屏幕上
-                  List<Display> displays = await screenRetriever.getAllDisplays();
-                  Display targetDisplay = displays.first;
-                  for (var display in displays) {
-                    if (_previousBounds!.center.dx >= display.visiblePosition!.dx &&
-                        _previousBounds!.center.dx <= display.visiblePosition!.dx + display.size.width) {
-                      targetDisplay = display;
-                      break;
-                    }
-                  }
-
-                  // 5. 设置无边框和置顶
-                  await windowManager.setAsFrameless();
-                  await windowManager.setAlwaysOnTop(true);
-
-                  // 6. 强行设置为显示器的物理像素全尺寸
-                  // 这里使用 targetDisplay.visiblePosition (起始点) 和 size (宽高)
-                  await windowManager.setBounds(Rect.fromLTWH(
-                    targetDisplay.visiblePosition!.dx,
-                    targetDisplay.visiblePosition!.dy,
-                    targetDisplay.size.width,
-                    targetDisplay.size.height,
-                  ));
-
-                  setState(() { _isFullscreen = true; });
-                } else {
-                  // --- 退出全屏模式 ---
-                  
-                  await windowManager.setAlwaysOnTop(false); // 取消置顶
-                  await windowManager.setTitleBarStyle(TitleBarStyle.normal); // 恢复边框
-                  
-                  // 恢复到全屏前的状态
-                   if (_previousBounds != null) {
-                    await windowManager.setBounds(_previousBounds!);
-                  }
-                  if (_wasMaximizedBeforeFullscreen) {
-                    // 如果全屏前是最大化的，直接恢复最大化
-                    await windowManager.maximize();
-                  } else {
-                    if (_previousBounds != null) {
-                      await windowManager.setBounds(_previousBounds!);
-                    }
-                  }
-                  
-                  setState(() { _isFullscreen = false; });
-                }
-              }
-            },
-          );
+          _webViewBridge.registerHandlers(controller);
         },
-        onLoadStop: (controller, url) async {
-          // 监听全屏变化
-          await controller.evaluateJavascript(source: """
-            document.addEventListener('fullscreenchange', function() {
-              const isFull = document.fullscreenElement !== null;
-              window.flutter_inappwebview.callHandler('toggleFullscreen', isFull);
-            });
-          """);
+        onConsoleMessage: (controller, consoleMessage) {
+          debugPrint(
+            '[WebViewConsole] ${consoleMessage.messageLevel.toString()}: ${consoleMessage.message}',
+          );
         },
       ),
     );
+  }
+
+  bool _isLockEffective(UserScriptConfig config) {
+    return config.sourceType == 'system' && config.lock == true;
+  }
+
+  bool _isScriptEnabled(UserScriptConfig config) {
+    if (_isLockEffective(config)) return true;
+    return UserScriptStorage.instance.getScriptEnabled(
+      config.scriptId,
+      defaultValue: true,
+    );
+  }
+
+  void _rebuildEnabledScripts() {
+    _enabledScripts = _allScripts
+        .where((config) => _isScriptEnabled(config))
+        .toList();
+  }
+
+  void _handleScriptSettingsChanged() {
+    if (!mounted) return;
+    setState(() {
+      _rebuildEnabledScripts();
+      _webViewRevision++;
+    });
+  }
+
+  void _handleFullscreenChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   // 侧边栏菜单项封装
   Widget _buildMenuItem(SidebarItem item, int index) {
     return Slidable(
       // key 是必须的，用于标识列表中的项
-      key: ValueKey(item.hashCode), 
-      enabled: index != 0, 
+      key: ValueKey(item.hashCode),
+      enabled: index != 0,
 
       // 右侧滑出的面板（从右往左划）
       endActionPane: ActionPane(
@@ -489,11 +808,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
               _handleClose(index - 1);
             },
             backgroundColor: Colors.transparent,
-            child: const Icon(
-              Icons.close,
-              size: 20,
-              color: Colors.white70,
-            ),
+            child: const Icon(Icons.close, size: 20, color: Colors.white70),
           ),
         ],
       ),
@@ -513,9 +828,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
               width: double.infinity,
               decoration: _currentIndex == index
                   ? const BoxDecoration(
-                      border: Border(left: BorderSide(color: Colors.orangeAccent, width: 3)),
+                      border: Border(
+                        left: BorderSide(color: Colors.orangeAccent, width: 3),
+                      ),
                       gradient: LinearGradient(
-                        colors: [Color.fromRGBO(255, 255, 255, 0.1), Colors.transparent],
+                        colors: [
+                          Color.fromRGBO(255, 255, 255, 0.1),
+                          Colors.transparent,
+                        ],
                       ),
                     )
                   : null,
@@ -557,7 +877,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   Widget _buildIcon(dynamic iconSource) {
     const double iconSize = 40.0;
-    
+
     return SizedBox(
       width: iconSize,
       height: iconSize,
@@ -565,18 +885,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         child: () {
           if (iconSource is IconData) {
             return Icon(iconSource, size: iconSize, color: Colors.white);
-          } 
+          }
           if (iconSource is String) {
             if (iconSource.endsWith('.svg')) {
               return SvgPicture.asset(
                 iconSource,
                 width: iconSize,
                 height: iconSize,
-                placeholderBuilder: (context) => const CircularProgressIndicator(),
+                placeholderBuilder: (context) =>
+                    const CircularProgressIndicator(),
               );
             } else {
               return Image.asset(
-                iconSource, 
+                iconSource,
                 width: iconSize,
                 height: iconSize,
                 fit: BoxFit.contain,
@@ -591,7 +912,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   Widget _buildSidebarIcon(dynamic iconSource, bool isActive) {
     const double iconSize = 26.0;
-    
+
     // 1. 处理系统图标 IconData
     if (iconSource is IconData) {
       return Icon(
@@ -599,12 +920,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
         size: iconSize,
         color: isActive ? Colors.white : Colors.white54,
       );
-    } 
-    
+    }
+
     // 2. 处理字符串路径 (PNG 或 SVG)
     if (iconSource is String) {
       Widget imageWidget;
-      
+
       if (iconSource.endsWith('.svg')) {
         // 如果是 SVG 路径
         imageWidget = SvgPicture.asset(
@@ -613,7 +934,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
           height: iconSize,
           fit: BoxFit.contain,
           // SVG 报错处理（可选）
-          placeholderBuilder: (context) => const Icon(Icons.broken_image, size: iconSize, color: Colors.white24),
+          placeholderBuilder: (context) => const Icon(
+            Icons.broken_image,
+            size: iconSize,
+            color: Colors.white24,
+          ),
         );
       } else {
         // 如果是普通的 PNG/JPG 路径
@@ -622,16 +947,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
           width: iconSize,
           height: iconSize,
           fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => 
-              const Icon(Icons.broken_image, size: iconSize, color: Colors.white24),
+          errorBuilder: (context, error, stackTrace) => const Icon(
+            Icons.broken_image,
+            size: iconSize,
+            color: Colors.white24,
+          ),
         );
       }
 
       // 统一应用透明度（未激活状态变淡）
-      return Opacity(
-        opacity: isActive ? 1.0 : 0.5, 
-        child: imageWidget,
-      );
+      return Opacity(opacity: isActive ? 1.0 : 0.5, child: imageWidget);
     }
 
     return const SizedBox(width: iconSize, height: iconSize);
@@ -639,34 +964,33 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
 
   AppItem _buildAppItem(String name, dynamic icon, String url) {
     return AppItem(
-        name: name, 
-        icon: icon, // 你的图片路径
-        onTap: () {
-          bool isFinded = false;
-          for (var item in _sidebarItems) {
-            if (item.label == name) {
-              isFinded = true;
-              setState(() {
-                _currentIndex = _sidebarItems.indexOf(item) + 1; // 切换显示层级
-              });
-              break;
-            }
-          }
-          if (!isFinded) {
-            setState(() {
-              _sidebarItems.add(
-                SidebarItem(
-                  label: name, 
-                  url: url, 
-                  icon: icon,
-                )
-              );
-              _currentIndex = _sidebarItems.length; // 切换显示层级
-            });
-          }
-        }
-      );
+      name: name,
+      icon: icon, // 你的图片路径
+      onTap: () {
+        _openOrFocusApp(name, icon, url);
+      },
+    );
   }
+
+  void _openOrFocusApp(String name, dynamic icon, String url) {
+    bool isFinded = false;
+    for (var item in _sidebarItems) {
+      if (item.label == name) {
+        isFinded = true;
+        setState(() {
+          _currentIndex = _sidebarItems.indexOf(item) + 1;
+        });
+        break;
+      }
+    }
+    if (!isFinded) {
+      setState(() {
+        _sidebarItems.add(SidebarItem(label: name, url: url, icon: icon));
+        _currentIndex = _sidebarItems.length;
+      });
+    }
+  }
+
   void _handleClose(int indexInSidebar) {
     setState(() {
       int targetStackIndex = indexInSidebar + 1; // 在 Stack 中的实际索引
@@ -683,7 +1007,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin, Wind
       _sidebarItems.removeAt(indexInSidebar);
     });
   }
-  
 }
 
 class StarFieldPainter extends CustomPainter {
@@ -697,7 +1020,8 @@ class StarFieldPainter extends CustomPainter {
     final paint = Paint()..color = Colors.white;
 
     for (var star in stars) {
-      double opacity = (math.sin(animation.value * 2 * math.pi * star.opacitySpeed) + 1) / 2; 
+      double opacity =
+          (math.sin(animation.value * 2 * math.pi * star.opacitySpeed) + 1) / 2;
       opacity = 0.1 + (opacity * 0.5);
       paint.color = Color.fromRGBO(255, 255, 255, opacity);
       canvas.drawCircle(Offset(star.x, star.y), star.size, paint);
@@ -710,7 +1034,12 @@ class StarFieldPainter extends CustomPainter {
 
 class Star {
   double x, y, size, opacitySpeed;
-  Star({required this.x, required this.y, required this.size, required this.opacitySpeed});
+  Star({
+    required this.x,
+    required this.y,
+    required this.size,
+    required this.opacitySpeed,
+  });
 }
 
 class AppItem {

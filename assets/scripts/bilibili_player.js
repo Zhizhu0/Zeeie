@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Bilibili 首页内嵌播放器 (居中悬浮版)
-// @namespace    http://tampermonkey.net/
 // @version      1.3
 // @description  点击首页视频链接时在当前页播放。Iframe内部隐藏头部导航，外部移除关闭按钮，点击遮罩层(顶部或左右两侧)关闭。
-// @author       You
+// @author       Zeeie
 // @match        https://www.bilibili.com/*
 // @grant        GM_addStyle
+// @run-at       document-end
 // ==/UserScript==
 
 (function() {
@@ -153,6 +153,23 @@
             background: #00aeec;
             transform: scale(1.1);
         }
+
+        /* 自定义 tooltip：跟随鼠标，离开遮罩时能正确消失 */
+        #bi-overlay-tooltip {
+            position: fixed;
+            padding: 8px 16px;
+            background: rgba(0, 0, 0, 0.75);
+            color: #fff;
+            font-size: 13px;
+            border-radius: 8px;
+            pointer-events: none;
+            z-index: 100000;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        #bi-overlay-tooltip.visible {
+            opacity: 1;
+        }
     `;
     GM_addStyle(css);
 
@@ -160,8 +177,12 @@
 
     const overlay = document.createElement('div');
     overlay.id = 'bi-overlay';
-    overlay.title = "点击空白处关闭视频";
     document.body.appendChild(overlay);
+
+    const overlayTooltip = document.createElement('div');
+    overlayTooltip.id = 'bi-overlay-tooltip';
+    overlayTooltip.textContent = "点击空白处关闭视频";
+    document.body.appendChild(overlayTooltip);
 
     const container = document.createElement('div');
     container.id = 'bi-drawer-container';
@@ -198,6 +219,7 @@
     function closeDrawer() {
         container.classList.remove('active');
         overlay.classList.remove('active');
+        overlayTooltip.classList.remove('visible');
         document.body.style.overflow = '';
         if (currentVideoUrl) {
             restoreBtn.classList.add('visible');
@@ -223,5 +245,21 @@
 
     // 点击遮罩层关闭 (包含顶部空白区域 + 左右两侧空白区域)
     overlay.addEventListener('click', closeDrawer);
+
+    // 自定义 tooltip：跟随鼠标，mouseleave 时隐藏
+    function updateTooltipPos(e) {
+        const offset = 12;
+        let x = e.clientX + offset;
+        let y = e.clientY + offset;
+        overlayTooltip.classList.add('visible');
+        const rect = overlayTooltip.getBoundingClientRect();
+        if (x + rect.width > window.innerWidth) x = e.clientX - rect.width - offset;
+        if (y + rect.height > window.innerHeight) y = e.clientY - rect.height - offset;
+        overlayTooltip.style.left = x + 'px';
+        overlayTooltip.style.top = y + 'px';
+    }
+    overlay.addEventListener('mouseenter', updateTooltipPos);
+    overlay.addEventListener('mouseleave', () => overlayTooltip.classList.remove('visible'));
+    overlay.addEventListener('mousemove', updateTooltipPos);
 
 })();

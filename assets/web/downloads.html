@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>下载管理</title>
+    <link rel="stylesheet" href="styles/downloads.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="title">下载管理</div>
+
+      <div class="summary">
+        <div class="summary-card">
+          <div class="label">全部记录</div>
+          <div class="value" id="summary-total">0</div>
+        </div>
+        <div class="summary-card">
+          <div class="label">正在下载</div>
+          <div class="value" id="summary-active">0</div>
+        </div>
+        <div class="summary-card">
+          <div class="label">已完成</div>
+          <div class="value" id="summary-completed">0</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">
+          <h2>下载列表</h2>
+          <div class="hint">正在下载时可取消，已完成可打开文件夹或删除</div>
+        </div>
+        <div class="list" id="download-list"></div>
+        <div class="empty" id="empty-state" hidden>暂无下载记录</div>
+      </div>
+    </div>
+  </body>
+</html>
